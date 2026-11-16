@@ -433,9 +433,11 @@ export function wardrobeImportApi(options = {}) {
     }
     const plans = await loadPlans();
     // A swap keeps the rest of the day's outfit (whatever is still available) and only changes one piece.
+    const swapBasis = new Map();
     for (const day of days) {
       const current = plans[day.date]?.garmentIds || [];
       if (!current.includes(day.replace)) { delete day.replace; continue; }
+      swapBasis.set(day.date, current.join("+"));
       day.keep = current.filter((id) => id !== day.replace && items.some((item) => item.id === id));
       const part = library.find((item) => item.id === day.replace)?.part;
       if (!items.some((item) => item.part === part && item.id !== day.replace)) throw Object.assign(new Error(`No other ${PART_NAMES[part] || "piece"} to swap in`), { status: 409 });
@@ -458,6 +460,10 @@ export function wardrobeImportApi(options = {}) {
       try { planned = validatePlan({ outfits: planned }, { items: available, days }); }
       catch (error) { throw Object.assign(error, { message: "Your closet changed while styling. Try again.", status: 409 }); }
       const fresh = await loadPlans();
+      // Another restyle or swap of the same day finished first; this swap was based on the old outfit.
+      if ([...swapBasis].some(([date, basis]) => (fresh[date]?.garmentIds || []).join("+") !== basis)) {
+        throw Object.assign(new Error("This outfit changed while swapping. Try again."), { status: 409 });
+      }
       const createdAt = new Date().toISOString();
       const replacedTryOns = planned.map((plan) => fresh[plan.date]?.tryOn?.image);
       for (const plan of planned) fresh[plan.date] = { ...plan, createdAt };
@@ -524,10 +530,11 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         // removeBack clears the processing status; then this result is stale and is thrown away.
         let previous = null;
         let removed = false;
-        await updateRecord(id, (record) => {
+        const updated = await updateRecord(id, (record) => {
           if (record.back?.status !== "processing") { removed = true; return; }
           previous = record.backImage; record.backImage = `${LIBRARY_ASSET_ROOT}/${file}`; record.back = { status: "ready", updatedAt: new Date().toISOString() };
         });
+        if (!updated) removed = true;
         const stale = removed ? file : previous;
         if (stale) await rm(path.join(libraryAssetDir, path.basename(stale)), { force: true });
       } catch (error) {
@@ -937,13 +944,13 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         job.stages[stageName].error = null;
         job.stages[stageName].updatedAt = new Date().toISOString();
         const startGarment = stageName === "crop" && decision === "approve" && job.stages.garment.status === "pending";
-        // Imports finish at the cutout; seeing pieces on the user is an on-demand outfit try-on instead.
-        if (stageName === "garment" && decision === "approve") job.status = "complete";
-        if (stageName === "modeled" && decision === "approve") job.status = "complete";
         await saveJob(job);
         if (decision === "approve" && stageName !== "crop") {
           try {
             await persistImported(job, stageName === "modeled");
+            // Imports finish at the cutout. Marked complete only after the copy, because listing jobs deletes complete ones.
+            job.status = "complete";
+            await saveJob(job);
           } catch (error) {
             job.stages[stageName].status = previousStatus;
             job.stages[stageName].decision = previousDecision;
