@@ -25,9 +25,27 @@ cp .env.example .env
 npm run dev
 ```
 
-⚠️ The importer stays disabled until you add `OPENAI_API_KEY` to `.env` and place a PNG reference photo of yourself at `data/model-reference.png`.
+⚠️ The importer stays disabled until AI is set up. Either sign in to the [Codex CLI](https://github.com/openai/codex) with `codex login` to use your ChatGPT plan, or add `OPENAI_API_KEY` to `.env`. Optionally add a PNG photo of yourself at `data/model-reference.png` to try planned outfits on.
 
 Open [localhost:5173](http://localhost:5173).
+
+## iPhone app: Valet
+
+`ios/` contains Valet, a native SwiftUI app named after the valet stand where you lay out tomorrow's clothes. It talks to the server above:
+
+- **Plan**: generate outfits for 1–14 days, with one style for all days or a style per day. Swipe a day to restyle or delete it.
+- **Closet**: tap a piece to mark it as in the laundry (unavailable) or available again. "Laundry done" returns everything at once.
+- **Import**: pick photos from your camera roll and review each crop and cutout.
+- **Try on**: ask for a photo of yourself wearing a planned outfit (needs `data/model-reference.png`).
+- **Notifications**: you're told when pieces are ready to review or a try-on is done, even with the app closed.
+
+Planning remembers what you wore or planned on nearby dates. It won't reuse a piece within 4 days unless you have no alternative, it never repeats an outfit combination, and it skips anything in the laundry. Outfits that contain laundry items or nearby repeats are flagged.
+
+```bash
+open ios/Wardrobe.xcodeproj   # after editing ios/project.yml, regenerate with: cd ios && xcodegen
+```
+
+In the app's Settings, enter your Mac's address, for example `http://my-mac.local:5173` (the simulator can use `http://localhost:5173`). Plans live in `data/plans.json`.
 
 ## Import with Codex
 
@@ -49,8 +67,9 @@ If you are setting up Wardrobe for a user, ask how they want to import their clo
 
 ## What it does
 
-- Detects every garment in a photo with the OpenAI Responses API
-- Extracts clean product cutouts with the OpenAI Images API
+- Runs on your ChatGPT plan through Codex, or on the OpenAI API with the newest available models
+- Detects every garment in a photo
+- Extracts product cutouts with transparent backgrounds from the photo you picked
 - Generates an optional modeled editorial preview
 - Keeps originals, jobs, generated images, and the JSON database local in `data/`
 - Supports drag, drop, paste, editing, review, regeneration, and approval
@@ -59,9 +78,12 @@ If you are setting up Wardrobe for a user, ask how they want to import their clo
 
 | Variable | Default |
 | --- | --- |
-| `OPENAI_API_KEY` | Required |
-| `OPENAI_VISION_MODEL` | `gpt-5.4-mini` |
-| `OPENAI_IMAGE_MODEL` | `gpt-image-2` |
+| `WARDROBE_AI_PROVIDER` | `auto`: your ChatGPT plan through `codex login` if signed in, otherwise `OPENAI_API_KEY`. Set `codex` or `api` to force one. |
+| `OPENAI_API_KEY` | Required only without Codex |
+| `OPENAI_VISION_MODEL` | Newest `gpt-*-terra` (falls back to newest `gpt-*-mini`) |
+| `OPENAI_PLANNER_MODEL` | Newest `gpt-*-terra` (falls back to newest `gpt-*-mini`) |
+| `OPENAI_IMAGE_MODEL` | Newest `gpt-image-*` |
+| `CODEX_MODEL` | Per task: terra to find clothes and plan, luna to drive image generation |
 | `OPENAI_IMAGE_QUALITY` | `high` |
 | `WARDROBE_MODEL_REFERENCE` | `data/model-reference.png` |
 | `WARDROBE_DATA_DIR` | `data` |
