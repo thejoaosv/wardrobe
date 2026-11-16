@@ -44,8 +44,8 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
         }
     }
 
-    private func start(base: URL) {
-        let since = Int(Date.now.timeIntervalSince1970 * 1000)
+    /// since is the server's cursor from the previous wait, so results landing between waits aren't skipped.
+    private func start(base: URL, since: Int = Int(Date.now.timeIntervalSince1970 * 1000)) {
         guard let url = URL(string: "/api/import/wait?since=\(since)", relativeTo: base) else { return }
         session.downloadTask(with: url).resume()
     }
@@ -63,6 +63,7 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
         let reviews: Int
         let tryOns: [TryOn]
         let backs: [TryOn]?
+        let cursor: Int?
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -80,7 +81,9 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
         }
         // The server caps each wait; keep waiting while it still has work.
         // An absolute path resolves against the finished request's host, which survives an app relaunch.
-        if result.busy, let url = downloadTask.originalRequest?.url { start(base: url) }
+        if result.busy, let url = downloadTask.originalRequest?.url {
+            if let cursor = result.cursor { start(base: url, since: cursor) } else { start(base: url) }
+        }
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

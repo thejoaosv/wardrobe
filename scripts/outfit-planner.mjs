@@ -71,7 +71,7 @@ Return JSON with an outfits array containing one entry per requested date.`;
 
 const pick = ({ id, name, part, color, secondaryColor, tags }) => ({ id, name, part, color, secondaryColor, tags });
 
-// Keeps only real, available garments, at most one per part (accessories excepted), and fails dates the model skipped.
+// Keeps only real, available garments, at most one per part, and fails dates without a top and a bottom.
 export function validatePlan(result, { items, days }) {
   const byId = new Map(items.map((item) => [item.id, item]));
   const outfits = new Map((result?.outfits || []).map((outfit) => [outfit.date, outfit]));
@@ -80,11 +80,11 @@ export function validatePlan(result, { items, days }) {
     const seen = new Set();
     const garmentIds = [...new Set(outfit?.garmentIds || [])].filter((id) => {
       const part = byId.get(id)?.part;
-      if (!part || (part !== "accessories_up" && seen.has(part))) return false;
+      if (!part || seen.has(part)) return false;
       seen.add(part);
       return true;
     });
-    if (!garmentIds.length) throw new Error(`The stylist returned no usable outfit for ${date}`);
+    if (!seen.has("upperbody") || !seen.has("lowerbody")) throw new Error(`The stylist returned no usable outfit for ${date}`);
     return { date, style, name: String(outfit.name || "Outfit").slice(0, 80), garmentIds, reason: String(outfit.reason || "").slice(0, 400) };
   });
 }

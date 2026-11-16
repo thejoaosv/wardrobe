@@ -19,6 +19,10 @@ test("validatePlan drops unknown ids, duplicate parts, and fails skipped dates",
   assert.deepEqual(day.garmentIds, ["tee", "jeans"]);
   assert.equal(day.style, "casual");
   assert.throws(() => validatePlan({ outfits: [] }, { items, days }), /no usable outfit/);
+  // A top alone isn't an outfit, and only one accessory is kept since the app shows one.
+  assert.throws(() => validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["tee"] }] }, { items, days }), /no usable outfit/);
+  const extras = [...items, { id: "cap", part: "accessories_up" }, { id: "watch", part: "accessories_up" }];
+  assert.deepEqual(validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["tee", "jeans", "cap", "watch"] }] }, { items: extras, days })[0].garmentIds, ["tee", "jeans", "cap"]);
 });
 
 test("historyFor excludes target dates and far-away plans", () => {

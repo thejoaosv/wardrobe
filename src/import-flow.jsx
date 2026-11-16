@@ -207,27 +207,28 @@ export function WardrobeImportFlow({ onGarmentApproved, onModeledApproved }) {
   const perform = async (job, stage, action, prompt = "") => {
     setBusyId(job.id); setError("");
     try {
+      let updated;
       if (stage === "garment" && action === "approve") {
         const draft = drafts[job.id];
         const metadata = { ...draft, secondaryColor: draft.secondaryColor || null, tags: draft.tags.split(",").map((tag) => tag.trim()).filter(Boolean) };
         await api(`${API}/${job.id}/metadata`, { method: "PATCH", body: JSON.stringify({ metadata }) });
-        const updated = await api(`${API}/${job.id}/stages/garment/approve`, { method: "POST" });
+        updated = await api(`${API}/${job.id}/stages/garment/approve`, { method: "POST" });
         const garmentPath = `/api/import/library/import-${job.id}-garment.png`;
         onGarmentApproved?.({ id: `import-${job.id}`, ...metadata, image: garmentPath, thumbnail: garmentPath, modeledImage: null, palette: [metadata.color, metadata.secondaryColor].filter(Boolean), importJobId: job.id });
-        setJobs((current) => current.map((item) => item.id === job.id ? updated : item));
       } else {
-        const updated = await api(`${API}/${job.id}/stages/${stage}/${action}`, { method: "POST", body: action === "regenerate" ? JSON.stringify({ prompt }) : undefined });
-        const removeFromQueue = action === "reject" || (stage === "modeled" && action === "approve");
-        const remainingJobs = removeFromQueue ? jobs.filter((item) => item.id !== job.id) : null;
-        setJobs((current) => removeFromQueue ? current.filter((item) => item.id !== job.id) : current.map((item) => item.id === job.id ? updated : item));
-        if (removeFromQueue) {
-          setDrafts((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== job.id)));
-          setSelectedReviewId(null);
-          if (!remainingJobs.length) setOpen(false);
-        }
-        if (action === "regenerate") setRegenerationPrompts((current) => ({ ...current, [`${job.id}:${stage}`]: "" }));
-        if (stage === "modeled" && action === "approve") onModeledApproved?.(job.id, `/api/import/library/import-${job.id}-modeled.png`);
+        updated = await api(`${API}/${job.id}/stages/${stage}/${action}`, { method: "POST", body: action === "regenerate" ? JSON.stringify({ prompt }) : undefined });
       }
+      // Approving a cutout finishes the import and the server deletes the job, so stop tracking it.
+      const removeFromQueue = action === "reject" || (action === "approve" && stage !== "crop");
+      const remainingJobs = removeFromQueue ? jobs.filter((item) => item.id !== job.id) : null;
+      setJobs((current) => removeFromQueue ? current.filter((item) => item.id !== job.id) : current.map((item) => item.id === job.id ? updated : item));
+      if (removeFromQueue) {
+        setDrafts((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== job.id)));
+        setSelectedReviewId(null);
+        if (!remainingJobs.length) setOpen(false);
+      }
+      if (action === "regenerate") setRegenerationPrompts((current) => ({ ...current, [`${job.id}:${stage}`]: "" }));
+      if (stage === "modeled" && action === "approve") onModeledApproved?.(job.id, `/api/import/library/import-${job.id}-modeled.png`);
     } catch (requestError) { setError(requestError.message); }
     finally { setBusyId(null); }
   };

@@ -449,6 +449,10 @@ export function wardrobeImportApi(options = {}) {
       planned = await stylist(retry);
     }
     return serial(async () => {
+      // Pieces may have been removed or put in the wash while the stylist ran.
+      const available = (await loadImported()).filter((item) => !item.unavailable);
+      try { planned = validatePlan({ outfits: planned }, { items: available, days }); }
+      catch (error) { throw Object.assign(error, { message: "Your closet changed while styling. Try again.", status: 409 }); }
       const fresh = await loadPlans();
       const createdAt = new Date().toISOString();
       for (const plan of planned) fresh[plan.date] = { ...plan, createdAt };
@@ -489,8 +493,13 @@ export function wardrobeImportApi(options = {}) {
     const photo = await normalizeImage(decodeImage(input).data);
     const lock = `back:${id}`;
     if (running.has(lock)) throw Object.assign(new Error("The back is already being cut out"), { status: 409 });
-    const record = await updateRecord(id, (record) => { record.back = { status: "processing" }; });
-    if (!record) throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
+    // Reserved before any await so a second request can't start a duplicate generation.
+    running.set(lock, null);
+    const record = await updateRecord(id, (record) => { record.back = { status: "processing" }; }).catch((error) => { running.delete(lock); throw error; });
+    if (!record) {
+      running.delete(lock);
+      throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
+    }
     const task = (async () => {
       try {
         const chromaKey = chooseChromaKey(record.color);
@@ -506,11 +515,17 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         bytes = await hasTransparentBackground(bytes) ? await frameTransparentGarment(bytes) : await removeChromaBackground(bytes, chromaKey);
         const file = `${id}-back-${Date.now()}.png`;
         await writeFile(path.join(libraryAssetDir, file), bytes);
+        // removeBack clears the processing status; then this result is stale and is thrown away.
         let previous = null;
-        await updateRecord(id, (record) => { previous = record.backImage; record.backImage = `${LIBRARY_ASSET_ROOT}/${file}`; record.back = { status: "ready", updatedAt: new Date().toISOString() }; });
-        if (previous) await rm(path.join(libraryAssetDir, path.basename(previous)), { force: true });
+        let removed = false;
+        await updateRecord(id, (record) => {
+          if (record.back?.status !== "processing") { removed = true; return; }
+          previous = record.backImage; record.backImage = `${LIBRARY_ASSET_ROOT}/${file}`; record.back = { status: "ready", updatedAt: new Date().toISOString() };
+        });
+        const stale = removed ? file : previous;
+        if (stale) await rm(path.join(libraryAssetDir, path.basename(stale)), { force: true });
       } catch (error) {
-        await updateRecord(id, (record) => { record.back = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
+        await updateRecord(id, (record) => { if (record.back?.status === "processing") record.back = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
       }
     })().finally(() => running.delete(lock));
     running.set(lock, task);
@@ -552,14 +567,17 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
     const plan = (await loadPlans())[date];
     if (!plan) throw Object.assign(new Error("No outfit planned for that day"), { status: 404 });
     const reference = await readModelReference();
+    const library = await loadImported();
+    const garments = plan.garmentIds.map((id) => library.find((item) => item.id === id));
+    if (garments.some((item) => !item?.image)) throw Object.assign(new Error("A piece in this outfit was removed. Restyle the day first."), { status: 409 });
     const lock = `try-on:${date}`;
     if (!running.has(lock)) {
+      // Reserved before any await so a second request can't start a duplicate generation.
+      running.set(lock, null);
       const key = plan.garmentIds.join("+");
-      await saveTryOn(date, key, { status: "processing" });
+      await saveTryOn(date, key, { status: "processing" }).catch((error) => { running.delete(lock); throw error; });
       const task = (async () => {
         try {
-          const library = await loadImported();
-          const garments = plan.garmentIds.map((id) => library.find((item) => item.id === id)).filter((item) => item?.image);
           const images = [{ data: reference, role: "identity reference: the exact person to dress" }];
           for (const { item, side, image } of tryOnReferences(garments)) {
             images.push({ data: await readFile(path.join(libraryAssetDir, path.basename(image))), role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name}, ${side} view (transparent cutout)` });
@@ -582,6 +600,8 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
   async function waitForWork(since) {
     const started = Date.now();
     while (running.size && Date.now() - started < 10 * 60 * 1000) await new Promise((resolve) => setTimeout(resolve, 2000));
+    // Taken before reading results: the next wait starts here, so nothing finishing in between is missed.
+    const cursor = Date.now();
     const ids = await readdir(jobsDir).catch(() => []);
     const jobs = (await Promise.all(ids.map((id) => loadJob(id)))).filter((job) => job && job.status !== "complete");
     const reviews = jobs.filter((job) => [job.stages.crop, job.stages.garment].some((stage) => stage?.status === "review" || stage?.status === "failed")).length;
@@ -591,7 +611,7 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
     const backs = (await loadImported())
       .filter((record) => record.back && record.back.status !== "processing" && Date.parse(record.back.updatedAt) >= since)
       .map((record) => ({ name: record.name, status: record.back.status }));
-    return { busy: running.size > 0, reviews, tryOns, backs };
+    return { busy: running.size > 0, reviews, tryOns, backs, cursor };
   }
 
   function persistImported(job, includeModeled = false) {
