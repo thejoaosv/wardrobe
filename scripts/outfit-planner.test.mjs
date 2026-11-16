@@ -3,7 +3,7 @@ import test from "node:test";
 import sharp from "sharp";
 import { buildTryOnPrompt, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
 import { pickModels } from "./openai-provider.mjs";
-import { duplicateCombos, historyFor, planIssues, repeatedGarments, validatePlan } from "./outfit-planner.mjs";
+import { duplicateCombos, historyFor, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const items = [
   { id: "tee", part: "upperbody" },
@@ -49,6 +49,14 @@ test("wear limits let jeans repeat on close days but not tees", () => {
   assert.ok(repeatedGarments(plans, "2026-11-19", items).includes("jeans"));
   // The user can say these jeans are a one-wear piece.
   assert.deepEqual(repeatedGarments(plans, "2026-11-17", [{ id: "jeans", part: "lowerbody", wears: 1 }]).sort(), ["jeans", "shirt"]);
+});
+
+test("swapIssues only accepts swapping the one piece for the same part", () => {
+  const days = [{ date: "2026-11-16", replace: "tee", keep: ["jeans"] }];
+  assert.deepEqual(swapIssues(days, [plan("2026-11-16", ["shirt", "jeans"])], items), []);
+  assert.equal(swapIssues(days, [plan("2026-11-16", ["shirt", "chinos"])], items).length, 1);
+  assert.equal(swapIssues(days, [plan("2026-11-16", ["tee", "jeans"])], items).length, 1);
+  assert.deepEqual(swapIssues([{ date: "2026-11-16", style: "casual" }], [plan("2026-11-16", ["tee", "chinos"])], items), []);
 });
 
 test("planIssues only flags avoidable repeats", () => {

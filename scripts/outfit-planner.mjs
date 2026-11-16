@@ -127,6 +127,17 @@ export function planIssues(plans, planned, items) {
   return issues;
 }
 
+// Swaps that kept every other piece and put one different piece of the same part in place of the swapped one pass.
+export function swapIssues(days, planned, library) {
+  const partOf = new Map(library.map((item) => [item.id, item.part]));
+  return days.filter((day) => day.replace).flatMap(({ date, replace, keep }) => {
+    const ids = planned.find((plan) => plan.date === date)?.garmentIds || [];
+    const part = partOf.get(replace);
+    const swapped = ids.length === keep.length + 1 && keep.every((id) => ids.includes(id)) && ids.some((id) => id !== replace && !keep.includes(id) && partOf.get(id) === part);
+    return swapped ? [] : [`${date} must keep ${keep.join(", ") || "nothing else"} and replace only ${replace} with another ${part}`];
+  });
+}
+
 // Every date whose exact garment combination also appears on another date.
 export function duplicateCombos(plans) {
   const groups = new Map();

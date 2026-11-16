@@ -3,7 +3,7 @@ import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 
 import path from "node:path";
 import sharp from "sharp";
 import { createAIProvider } from "./openai-provider.mjs";
-import { DATE, buildPlanPrompt, historyFor, planIssues, planSchema, repeatedGarments, validatePlan } from "./outfit-planner.mjs";
+import { DATE, buildPlanPrompt, historyFor, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
 const ASSET_ROOT = "/api/import/assets";
@@ -426,27 +426,31 @@ export function wardrobeImportApi(options = {}) {
       replace: typeof day?.replace === "string" ? day.replace : undefined,
     }));
     if (days.some((day) => !day.date) || new Set(days.map((day) => day.date)).size !== days.length) throw Object.assign(new Error("Each day needs a unique YYYY-MM-DD date"), { status: 400 });
-    const items = (await loadImported()).filter((item) => !item.unavailable);
+    const library = await loadImported();
+    const items = library.filter((item) => !item.unavailable);
     if (!items.some((item) => item.part === "upperbody") || !items.some((item) => item.part === "lowerbody")) {
       throw Object.assign(new Error("Plan needs at least one available top and one available bottom"), { status: 409 });
     }
     const plans = await loadPlans();
-    // A swap keeps the rest of the day's outfit and only changes one piece.
+    // A swap keeps the rest of the day's outfit (whatever is still available) and only changes one piece.
     for (const day of days) {
       const current = plans[day.date]?.garmentIds || [];
-      if (current.includes(day.replace)) day.keep = current.filter((id) => id !== day.replace);
-      else delete day.replace;
+      if (!current.includes(day.replace)) { delete day.replace; continue; }
+      day.keep = current.filter((id) => id !== day.replace && items.some((item) => item.id === id));
+      const part = library.find((item) => item.id === day.replace)?.part;
+      if (!items.some((item) => item.part === part && item.id !== day.replace)) throw Object.assign(new Error(`No other ${PART_NAMES[part] || "piece"} to swap in`), { status: 409 });
     }
     const prompt = buildPlanPrompt({ items, days, history: historyFor(plans, days.map((day) => day.date)) });
     // AI and validation failures are upstream problems the app should be able to show, not opaque 500s.
     const stylist = (text) => ai.json({ prompt: text, schema: planSchema }).then((result) => validatePlan(result, { items, days }))
       .catch((error) => { throw Object.assign(error, { status: 502 }); });
     let planned = await stylist(prompt);
-    const issues = planIssues(plans, planned, items);
-    for (const day of days) if (day.replace && planned.find((plan) => plan.date === day.date).garmentIds.includes(day.replace)) issues.push(`${day.date} still wears ${day.replace}, which should be swapped out`);
+    const issues = [...planIssues(plans, planned, items), ...swapIssues(days, planned, library)];
     if (issues.length) {
       const retry = `${prompt}\n\nA previous attempt broke these rules; avoid them: ${issues.join("; ")}.`;
       planned = await stylist(retry);
+      // Repeats are soft rules, but a swap that changed more than the one piece would overwrite the user's outfit.
+      if (swapIssues(days, planned, library).length) throw Object.assign(new Error("The stylist couldn't swap just that piece. Try again."), { status: 502 });
     }
     return serial(async () => {
       // Pieces may have been removed or put in the wash while the stylist ran.
@@ -455,8 +459,10 @@ export function wardrobeImportApi(options = {}) {
       catch (error) { throw Object.assign(error, { message: "Your closet changed while styling. Try again.", status: 409 }); }
       const fresh = await loadPlans();
       const createdAt = new Date().toISOString();
+      const replacedTryOns = planned.map((plan) => fresh[plan.date]?.tryOn?.image);
       for (const plan of planned) fresh[plan.date] = { ...plan, createdAt };
       await atomicJson(plansFile, fresh);
+      await Promise.all(replacedTryOns.map(removeOutfitImage));
       return await planList(fresh);
     });
   }
@@ -550,16 +556,18 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
     }
   }
 
+  const removeOutfitImage = (image) => image && rm(path.join(outfitDir, path.basename(image)), { force: true });
+
   // Saves try-on progress only if the plan still has the same garments; a restyle discards stale results.
   function saveTryOn(date, key, tryOn) {
     return serial(async () => {
       const plans = await loadPlans();
       const plan = plans[date];
-      if (!plan || plan.garmentIds.join("+") !== key) return;
+      if (!plan || plan.garmentIds.join("+") !== key) return await removeOutfitImage(tryOn.image);
       const previous = plan.tryOn?.image;
       plan.tryOn = { ...tryOn, updatedAt: new Date().toISOString() };
       await atomicJson(plansFile, plans);
-      if (previous && previous !== plan.tryOn.image) await rm(path.join(outfitDir, path.basename(previous)), { force: true });
+      if (previous !== plan.tryOn.image) await removeOutfitImage(previous);
     });
   }
 
@@ -804,8 +812,10 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       if (planMatch && req.method === "DELETE") {
         return json(res, 200, await serial(async () => {
           const plans = await loadPlans();
+          const image = plans[planMatch[1]]?.tryOn?.image;
           delete plans[planMatch[1]];
           await atomicJson(plansFile, plans);
+          await removeOutfitImage(image);
           return await planList(plans);
         }));
       }
