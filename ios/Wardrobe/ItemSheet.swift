@@ -92,6 +92,17 @@ struct ItemSheet: View {
                         }
                     }
 
+                    field("Wears before washing") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Stepper(value: Binding(get: { draft.wearLimit }, set: { draft.wears = $0 }), in: 1...10) {
+                                Text(draft.wearLimit == 1 ? "Once" : "\(draft.wearLimit) times").font(.body.weight(.medium))
+                                    .contentTransition(.numericText())
+                            }
+                            Text("Outfits can repeat it on nearby days up to this many times.")
+                                .font(.footnote).foregroundStyle(Theme.muted)
+                        }
+                    }
+
                     field("Back") {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Add a photo of the back if it has a print or detail worth seeing. Try-ons will then turn to show it.")
@@ -155,7 +166,7 @@ struct ItemSheet: View {
         .onDisappear {
             addTag()
             if draft.name != original.name || draft.part != original.part || draft.color != original.color
-                || draft.secondaryColor != original.secondaryColor || draft.tags != original.tags,
+                || draft.secondaryColor != original.secondaryColor || draft.tags != original.tags || draft.wears != original.wears,
                store.item(original.id) != nil {
                 let edited = draft
                 Task { await store.update(edited) }

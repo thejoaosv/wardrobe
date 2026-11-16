@@ -3,6 +3,10 @@ export const DATE = /^\d{4}-\d{2}-\d{2}$/;
 // Garments worn within this many days of a target date count as "recent".
 export const SPACING_DAYS = 4;
 
+// How many times a piece is usually worn before it needs washing, when the user hasn't set it.
+export const DEFAULT_WEARS = { upperbody: 1, lowerbody: 3, wholebody_up: 5, shoes: 7, accessories_up: 7 };
+export const wearsFor = (item) => Number.isInteger(item?.wears) ? item.wears : DEFAULT_WEARS[item?.part] ?? 1;
+
 const dayNumber = (date) => Date.parse(`${date}T00:00:00Z`) / DAY;
 const comboKey = (ids) => [...ids].sort().join("+");
 
@@ -40,7 +44,7 @@ export function historyFor(plans, dates) {
 }
 
 export function buildPlanPrompt({ items, days, history }) {
-  const wardrobe = items.map(({ id, name, part, color, secondaryColor, tags }) => ({ id, name, part, color, secondaryColor, tags }));
+  const wardrobe = items.map((item) => ({ ...pick(item), wears: wearsFor(item) }));
   return `You are a personal stylist planning outfits from a real wardrobe.
 
 Plan exactly one outfit for each requested day:
@@ -55,14 +59,17 @@ ${JSON.stringify(history)}
 Rules:
 - Each outfit has one upperbody top and one lowerbody bottom, plus optional wholebody_up outer layer, shoes, and at most one accessories_up item.
 - Match each day's requested style. Use color harmony: tonal or analogous palettes, one statement piece at most.
-- Do not repeat a garment within ${SPACING_DAYS} days of another date where it is worn, counting both the history and the other days in this plan. Only reuse a garment sooner when the wardrobe has no alternative for that part; then reuse the one worn longest ago, preferring neutral basics.
+- wears is how many times a garment can be worn before it needs washing. Within ${SPACING_DAYS} days either side of any date, a garment may be worn on at most wears dates in total, counting the history and the other days in this plan. So a wears-1 tee should not repeat within ${SPACING_DAYS} days, while wears-3 jeans can be worn on up to three close or consecutive days. Only go past a limit when the wardrobe has no alternative for that part; then reuse the one worn longest ago, preferring neutral basics.
 - Never repeat an exact garment combination from the history or within this plan.
 - Spread usage across the whole wardrobe instead of leaning on the same favorites.
 - Every requested date must get a complete outfit. The repetition rules are preferences: when the wardrobe is too small to satisfy them, repeat the least recently worn pieces rather than leaving a day empty.
+- A day with replace is a swap: keep that day's keep garments and replace only the replace garment with a different garment of the same part.
 - Use exact ids from the wardrobe list. name is a short evocative outfit title; reason is one sentence on why it works for the style.
 
 Return JSON with an outfits array containing one entry per requested date.`;
 }
+
+const pick = ({ id, name, part, color, secondaryColor, tags }) => ({ id, name, part, color, secondaryColor, tags });
 
 // Keeps only real, available garments, at most one per part (accessories excepted), and fails dates the model skipped.
 export function validatePlan(result, { items, days }) {
@@ -82,14 +89,21 @@ export function validatePlan(result, { items, days }) {
   });
 }
 
-// Garment ids worn within SPACING_DAYS of date in the given plans; the app uses this to flag repeats.
-export function repeatedGarments(plans, date) {
+// How often each garment is worn within SPACING_DAYS of date, not counting date itself.
+function wornNear(plans, date) {
   const target = dayNumber(date);
-  const recent = new Set();
+  const worn = new Map();
   for (const plan of Object.values(plans)) {
-    if (plan.date !== date && Math.abs(dayNumber(plan.date) - target) <= SPACING_DAYS) plan.garmentIds.forEach((id) => recent.add(id));
+    if (plan.date !== date && Math.abs(dayNumber(plan.date) - target) <= SPACING_DAYS) plan.garmentIds.forEach((id) => worn.set(id, (worn.get(id) || 0) + 1));
   }
-  return (plans[date]?.garmentIds || []).filter((id) => recent.has(id));
+  return worn;
+}
+
+// Garment ids on date that go past their wear limit nearby; the app uses this to flag repeats.
+export function repeatedGarments(plans, date, items = []) {
+  const worn = wornNear(plans, date);
+  const byId = new Map(items.map((item) => [item.id, item]));
+  return (plans[date]?.garmentIds || []).filter((id) => (worn.get(id) || 0) >= wearsFor(byId.get(id)));
 }
 
 // Avoidable rule breaks in a fresh plan: a recent garment reused while an unused same-part garment existed, or a repeated combo.
@@ -98,13 +112,10 @@ export function planIssues(plans, planned, items) {
   const byId = new Map(items.map((item) => [item.id, item]));
   const issues = [];
   for (const { date } of planned) {
-    const target = dayNumber(date);
-    const nearby = new Set(Object.values(merged)
-      .filter((plan) => plan.date !== date && Math.abs(dayNumber(plan.date) - target) <= SPACING_DAYS)
-      .flatMap((plan) => plan.garmentIds));
-    for (const id of repeatedGarments(merged, date)) {
+    const worn = wornNear(merged, date);
+    for (const id of repeatedGarments(merged, date, items)) {
       const part = byId.get(id)?.part;
-      if (items.some((item) => item.part === part && !nearby.has(item.id))) issues.push(`${date} reuses ${id} although other ${part} items are free`);
+      if (items.some((item) => item.part === part && (worn.get(item.id) || 0) < wearsFor(item))) issues.push(`${date} wears ${id} past its wash limit although other ${part} items are free`);
     }
   }
   const dates = new Set(planned.map((plan) => plan.date));

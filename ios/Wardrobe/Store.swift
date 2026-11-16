@@ -14,8 +14,11 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var backImage: String?
     var back: Back?
     var unavailable: Bool?
+    /// Wears before it needs washing; nil follows the category default.
+    var wears: Int?
 
     var isAvailable: Bool { unavailable != true }
+    var wearLimit: Int { wears ?? Parts.defaultWears[part] ?? 1 }
 
     struct Back: Codable, Hashable { var status: String; var error: String? }
 }
@@ -60,10 +63,12 @@ nonisolated struct ServerConfig: Codable {
     var modelReference: String
 }
 
-struct PlanDay: Hashable { var date: Date; var style: String }
+struct PlanDay: Hashable { var date: Date; var style: String; var replace: String? = nil }
 
-enum Parts {
+nonisolated enum Parts {
     static let order = ["upperbody", "wholebody_up", "lowerbody", "shoes", "accessories_up"]
+    /// Mirrors DEFAULT_WEARS in scripts/outfit-planner.mjs.
+    static let defaultWears = ["upperbody": 1, "lowerbody": 3, "wholebody_up": 5, "shoes": 7, "accessories_up": 7]
     static func label(_ part: String) -> String {
         ["upperbody": "Tops", "wholebody_up": "Jackets", "lowerbody": "Bottoms", "shoes": "Shoes", "accessories_up": "Accessories"][part] ?? part
     }
@@ -178,6 +183,7 @@ final class Store {
             var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? []]
             body["color"] = item.color
             body["secondaryColor"] = item.secondaryColor ?? NSNull()
+            body["wears"] = item.wears ?? NSNull()
             let saved: Item = try await send("/api/import/wardrobe/\(item.id)", method: "PATCH", body: body)
             if let index = items.firstIndex(where: { $0.id == saved.id }) { items[index] = saved }
         }
@@ -210,7 +216,11 @@ final class Store {
         planningDates.formUnion(dates)
         defer { planningDates.subtract(dates) }
         await run {
-            let body = days.map { ["date": Day.string($0.date), "style": $0.style] }
+            let body = days.map { day in
+                var entry = ["date": Day.string(day.date), "style": day.style]
+                entry["replace"] = day.replace
+                return entry
+            }
             plans = try await send("/api/import/plans", method: "POST", body: ["days": body])
         }
     }

@@ -33,11 +33,25 @@ test("repeats and duplicate combos are detected", () => {
   assert.deepEqual(duplicateCombos(plans).sort(), ["2026-11-16", "2026-11-18"]);
 });
 
+test("wear limits let jeans repeat on close days but not tees", () => {
+  const plans = {
+    "2026-11-16": plan("2026-11-16", ["tee", "jeans"]),
+    "2026-11-17": plan("2026-11-17", ["shirt", "jeans"]),
+    "2026-11-18": plan("2026-11-18", ["tee", "jeans"]),
+  };
+  // Three wears of three-wear jeans are fine; the tee back after two days is not.
+  assert.deepEqual(repeatedGarments(plans, "2026-11-18", items), ["tee"]);
+  plans["2026-11-19"] = plan("2026-11-19", ["shirt", "jeans"]);
+  assert.ok(repeatedGarments(plans, "2026-11-19", items).includes("jeans"));
+  // The user can say these jeans are a one-wear piece.
+  assert.deepEqual(repeatedGarments(plans, "2026-11-17", [{ id: "jeans", part: "lowerbody", wears: 1 }]).sort(), ["jeans", "shirt"]);
+});
+
 test("planIssues only flags avoidable repeats", () => {
   const plans = { "2026-11-16": plan("2026-11-16", ["tee", "jeans"]) };
   const issues = planIssues(plans, [plan("2026-11-17", ["tee", "chinos"])], items);
   assert.equal(issues.length, 1);
-  assert.match(issues[0], /reuses tee/);
+  assert.match(issues[0], /wears tee past/);
   // With a single top, reusing it is unavoidable.
   assert.deepEqual(planIssues(plans, [plan("2026-11-17", ["tee", "chinos"])], items.filter((item) => item.id !== "shirt")), []);
   // A one-top, one-bottom wardrobe can only repeat itself.

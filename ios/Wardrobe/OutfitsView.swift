@@ -127,7 +127,7 @@ private struct DayPage: View {
                 if isStyling || plan == nil {
                     StylingPlaceholder()
                 } else if let plan {
-                    DressedOutfit(items: plan.garmentIds.compactMap(store.item))
+                    DressedOutfit(items: plan.garmentIds.compactMap(store.item), plan: plan)
                         .id(plan.garmentIds.joined())
                 }
             }
@@ -204,6 +204,7 @@ private struct PlanFooter: View {
 /// The outfit laid out as it is worn: layer and top above bottoms, shoes at the feet.
 struct DressedOutfit: View {
     let items: [Item]
+    var plan: Plan?
 
     private func first(_ part: String) -> Item? { items.first { $0.part == part } }
 
@@ -219,29 +220,29 @@ struct DressedOutfit: View {
             // Cutouts carry ~6% padding, so zones overlap slightly to read as one figure.
             ZStack {
                 if let layer, top != nil {
-                    GarmentPiece(item: layer, order: 0)
+                    GarmentPiece(item: layer, order: 0, plan: plan)
                         .frame(width: width * 0.7, height: height * 0.4)
                         .position(x: width * 0.62, y: height * 0.2)
                 }
                 if let upper = top ?? layer {
-                    GarmentPiece(item: upper, order: 1)
+                    GarmentPiece(item: upper, order: 1, plan: plan)
                         .frame(width: width * (layer != nil && top != nil ? 0.66 : 0.82), height: height * 0.4)
                         .position(x: width * (layer != nil && top != nil ? 0.4 : 0.5), y: height * 0.21)
                         .zIndex(2)
                 }
                 if let bottom {
-                    GarmentPiece(item: bottom, order: 2)
+                    GarmentPiece(item: bottom, order: 2, plan: plan)
                         .frame(width: width * 0.8, height: height * 0.46)
                         .position(x: width * 0.5, y: height * 0.6)
                         .zIndex(1)
                 }
                 if let shoes {
-                    GarmentPiece(item: shoes, order: 3)
+                    GarmentPiece(item: shoes, order: 3, plan: plan)
                         .frame(width: width * 0.48, height: height * 0.16)
                         .position(x: width * 0.5, y: height * 0.91)
                 }
                 if let accessory {
-                    GarmentPiece(item: accessory, order: 4)
+                    GarmentPiece(item: accessory, order: 4, plan: plan)
                         .frame(width: width * 0.26, height: height * 0.14)
                         .position(x: width * 0.88, y: height * 0.08)
                         .zIndex(3)
@@ -257,6 +258,7 @@ private struct GarmentPiece: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: Item
     let order: Int
+    let plan: Plan?
     @State private var shown = false
     @State private var editing = false
 
@@ -268,6 +270,11 @@ private struct GarmentPiece: View {
             .offset(y: shown || reduceMotion ? 0 : 28)
             .scaleEffect(shown || reduceMotion ? 1 : 0.94)
             .contextMenu {
+                if let plan {
+                    Button("Swap this piece", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, replace: item.id)]) }
+                    }
+                }
                 Button(item.isAvailable ? "In the wash" : "Back from the wash", systemImage: "washer") {
                     Task { await store.setUnavailable([item.id], item.isAvailable) }
                 }

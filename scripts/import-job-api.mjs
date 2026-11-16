@@ -414,9 +414,8 @@ export function wardrobeImportApi(options = {}) {
   }
 
   async function planList(plans) {
-    // Shoes and accessories are routinely re-worn, so only clothing repeats are flagged.
-    const clothing = new Set((await loadImported()).filter((item) => ["upperbody", "lowerbody", "wholebody_up"].includes(item.part)).map((item) => item.id));
-    return Object.values(plans).sort((a, b) => a.date.localeCompare(b.date)).map((plan) => ({ ...plan, repeats: repeatedGarments(plans, plan.date).filter((id) => clothing.has(id)) }));
+    const items = await loadImported();
+    return Object.values(plans).sort((a, b) => a.date.localeCompare(b.date)).map((plan) => ({ ...plan, repeats: repeatedGarments(plans, plan.date, items) }));
   }
 
   async function planOutfits(input) {
@@ -424,6 +423,7 @@ export function wardrobeImportApi(options = {}) {
     const days = input.days.map((day) => ({
       date: typeof day?.date === "string" && DATE.test(day.date) && !Number.isNaN(Date.parse(day.date)) ? day.date : null,
       style: typeof day?.style === "string" ? day.style.trim().slice(0, 80) || "everyday" : "everyday",
+      replace: typeof day?.replace === "string" ? day.replace : undefined,
     }));
     if (days.some((day) => !day.date) || new Set(days.map((day) => day.date)).size !== days.length) throw Object.assign(new Error("Each day needs a unique YYYY-MM-DD date"), { status: 400 });
     const items = (await loadImported()).filter((item) => !item.unavailable);
@@ -431,12 +431,19 @@ export function wardrobeImportApi(options = {}) {
       throw Object.assign(new Error("Plan needs at least one available top and one available bottom"), { status: 409 });
     }
     const plans = await loadPlans();
+    // A swap keeps the rest of the day's outfit and only changes one piece.
+    for (const day of days) {
+      const current = plans[day.date]?.garmentIds || [];
+      if (current.includes(day.replace)) day.keep = current.filter((id) => id !== day.replace);
+      else delete day.replace;
+    }
     const prompt = buildPlanPrompt({ items, days, history: historyFor(plans, days.map((day) => day.date)) });
     // AI and validation failures are upstream problems the app should be able to show, not opaque 500s.
     const stylist = (text) => ai.json({ prompt: text, schema: planSchema }).then((result) => validatePlan(result, { items, days }))
       .catch((error) => { throw Object.assign(error, { status: 502 }); });
     let planned = await stylist(prompt);
     const issues = planIssues(plans, planned, items);
+    for (const day of days) if (day.replace && planned.find((plan) => plan.date === day.date).garmentIds.includes(day.replace)) issues.push(`${day.date} still wears ${day.replace}, which should be swapped out`);
     if (issues.length) {
       const retry = `${prompt}\n\nA previous attempt broke these rules; avoid them: ${issues.join("; ")}.`;
       planned = await stylist(retry);
@@ -464,11 +471,14 @@ export function wardrobeImportApi(options = {}) {
 
   async function editRecord(id, input) {
     // Invalid values are ignored rather than normalized to defaults, so a bad category never turns a piece into a top.
-    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), tags: Array.isArray };
+    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), tags: Array.isArray, wears: (value) => value === null || (Number.isInteger(value) && value >= 1 && value <= 10) };
     const fields = Object.keys(valid).filter((key) => key in input && valid[key](input[key]));
     const record = await updateRecord(id, (record) => {
       const metadata = normalizeMetadata({ ...record, ...Object.fromEntries(fields.map((key) => [key, input[key]])) });
       Object.assign(record, { name: metadata.name, part: metadata.part, color: metadata.color, secondaryColor: metadata.secondaryColor, tags: metadata.tags, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
+      // null goes back to the category default.
+      if (input.wears === null) delete record.wears;
+      else if (fields.includes("wears")) record.wears = input.wears;
     });
     if (!record) throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
     return record;
