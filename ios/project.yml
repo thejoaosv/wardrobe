@@ -1,0 +1,52 @@
+name: Wardrobe
+options:
+  bundleIdPrefix: dev.wardrobe
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    DEVELOPMENT_TEAM: ""
+    # Spelled out because XcodeGen setting presets may be missing from binary installs.
+    SDKROOT: iphoneos
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    PRODUCT_NAME: $(TARGET_NAME)
+    ALWAYS_SEARCH_USER_PATHS: NO
+    CODE_SIGN_STYLE: Automatic
+    LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks"]
+    ENABLE_PREVIEWS: YES
+  configs:
+    Debug:
+      ONLY_ACTIVE_ARCH: YES
+      SWIFT_OPTIMIZATION_LEVEL: -Onone
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      DEBUG_INFORMATION_FORMAT: dwarf
+      ENABLE_TESTABILITY: YES
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+targets:
+  Wardrobe:
+    type: application
+    platform: iOS
+    sources: [Wardrobe]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.wardrobe.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Valet
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Valet connects to the Wardrobe server running on your Mac.
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: Choose photos of clothes to import.
+    info:
+      path: Wardrobe/Info.plist
+      properties:
+        # The Wardrobe server runs over plain HTTP on the local network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
