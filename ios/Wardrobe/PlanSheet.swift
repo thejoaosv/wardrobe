@@ -2,78 +2,67 @@ import SwiftUI
 
 let presetStyles = ["Casual", "Smart casual", "Office", "Date night", "Streetwear", "Sporty", "Minimal", "Cozy"]
 
+let weathers: [(id: String, label: String, symbol: String)] = [
+    ("auto", "Auto", "wand.and.stars"), ("warm", "Warm", "sun.max"), ("mild", "Mild", "cloud.sun"), ("cold", "Cold", "snowflake"), ("rain", "Rain", "cloud.rain"),
+]
+
+/// Three choices, top to bottom: which days, what weather, what style. All remembered, so planning again is one tap.
 struct PlanForm: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var startsTomorrow = false
-    @State private var count = 5
-    @State private var mixStyles = false
-    @State private var style = "Casual"
-    @State private var styles = Array(repeating: "Casual", count: 7)
-    @State private var weather = "auto"
+    @AppStorage("plan.days") private var dayCount = 5
+    @AppStorage("plan.weather") private var weather = "auto"
+    @AppStorage("plan.style") private var style = "Casual"
+    @State private var selected: Set<String> = []
+    @State private var perDay = false
+    @State private var styles: [String: String] = [:]
 
-    private var dates: [Date] {
-        let start = Calendar.current.date(byAdding: .day, value: startsTomorrow ? 1 : 0, to: Calendar.current.startOfDay(for: .now))!
-        return (0..<count).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: start) }
+    /// The next two weeks, from today.
+    private var upcoming: [String] {
+        (0..<14).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: Calendar.current.startOfDay(for: .now)) }.map(Day.string)
     }
-
-    private var weatherHint: String {
-        ["warm": "Just a top, no layers.", "mild": "A light layer when the style suits it.", "cold": "A hoodie or sweater over the top, and a jacket if you have one.", "rain": "A jacket on top."][weather]
-            ?? "Layers picked for the time of year."
-    }
+    private var days: [String] { upcoming.filter(selected.contains) }
+    private var replacing: Int { days.filter { date in store.plans.contains { $0.date == date } }.count }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: 30) {
                 Text("Plan outfits").font(.display(34))
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("When").eyebrow()
-                    Picker("Start", selection: $startsTomorrow) {
-                        Text("From today").tag(false)
-                        Text("From tomorrow").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    Picker("Days", selection: $count) {
-                        ForEach([1, 3, 5, 7], id: \.self) { Text($0 == 1 ? "1 day" : "\($0) days").tag($0) }
-                    }
-                    .pickerStyle(.segmented)
+                section("Days", hint: "Tap the days you need outfits for.") {
+                    DayStrip(days: upcoming, selected: $selected, planned: Set(store.plans.map(\.date)))
+                        .padding(.horizontal, -24)
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Weather").eyebrow()
-                    Picker("Weather", selection: $weather) {
-                        Text("Auto").tag("auto")
-                        Text("Warm").tag("warm")
-                        Text("Mild").tag("mild")
-                        Text("Cold").tag("cold")
-                        Text("Rain").tag("rain")
+                section("Weather", hint: weatherHint) {
+                    HStack(spacing: 8) {
+                        ForEach(weathers, id: \.id) { option in
+                            Tile(label: option.label, symbol: option.symbol, selected: weather == option.id) { weather = option.id }
+                        }
                     }
-                    .pickerStyle(.segmented)
-                    Text(weatherHint).font(.footnote).foregroundStyle(Theme.muted)
+                    .sensoryFeedback(.selection, trigger: weather)
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("Style").eyebrow()
-                        Spacer()
-                        Toggle("Mix per day", isOn: $mixStyles.animation(Theme.spring))
-                            .toggleStyle(.button).buttonStyle(.plain)
+                section("Style") {
+                    StyleChips(style: $style)
+                    if days.count > 1 {
+                        Toggle("Different style each day", isOn: $perDay.animation(Theme.spring))
                             .font(.subheadline.weight(.medium))
-                            .foregroundStyle(mixStyles ? Theme.ink : Theme.muted)
-                    }
-                    if mixStyles {
-                        ForEach(Array(dates.enumerated()), id: \.offset) { index, date in
-                            HStack {
-                                Text(date, format: .dateTime.weekday(.wide)).font(.body)
-                                Spacer()
-                                StyleMenu(style: $styles[index])
+                            .tint(Theme.ink)
+                            .padding(.top, 6)
+                        if perDay {
+                            VStack(spacing: 0) {
+                                ForEach(days, id: \.self) { date in
+                                    HStack {
+                                        Text(Day.date(date), format: .dateTime.weekday(.wide).day())
+                                        Spacer()
+                                        StyleMenu(style: Binding(get: { styles[date] ?? style }, set: { styles[date] = $0 }))
+                                    }
+                                    .frame(minHeight: 48)
+                                }
                             }
-                            .frame(minHeight: 44)
                             .transition(.move(edge: .top).combined(with: .opacity))
                         }
-                    } else {
-                        StyleChips(style: $style).transition(.opacity)
                     }
                 }
             }
@@ -81,16 +70,111 @@ struct PlanForm: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .safeAreaInset(edge: .bottom) {
-            Button(count == 1 ? "Style my day" : "Style \(count) days") {
-                let days = dates.enumerated().map { PlanDay(date: $1, style: mixStyles ? styles[$0] : style, weather: weather) }
-                Task { await store.generate(days) }
-                dismiss()
+            VStack(spacing: 8) {
+                if replacing > 0 {
+                    Text(replacing == 1 ? "Replaces 1 planned outfit" : "Replaces \(replacing) planned outfits")
+                        .font(.footnote).foregroundStyle(Theme.muted)
+                }
+                Button(buttonTitle, action: start)
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(days.isEmpty)
+                    .opacity(days.isEmpty ? 0.4 : 1)
             }
-            .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 24)
             .padding(.bottom, 8)
         }
         .background(Theme.canvas.ignoresSafeArea())
+        .onAppear {
+            if selected.isEmpty { selected = Set(upcoming.prefix(max(1, min(dayCount, 14)))) }
+        }
+    }
+
+    private var buttonTitle: String {
+        switch days.count {
+        case 0: "Pick a day"
+        case 1: "Style \(Day.date(days[0]).formatted(.dateTime.weekday(.wide)))"
+        default: "Style \(days.count) days"
+        }
+    }
+
+    private var weatherHint: String {
+        ["warm": "Just a top, no layers.", "mild": "A light layer when the style suits it.", "cold": "A hoodie or sweater over the top, and a jacket if you have one.", "rain": "A jacket on top."][weather]
+            ?? "Layers picked for the time of year."
+    }
+
+    private func start() {
+        let plan = days.map { PlanDay(date: Day.date($0), style: perDay ? styles[$0] ?? style : style, weather: weather) }
+        dayCount = plan.count
+        Task { await store.generate(plan) }
+        dismiss()
+    }
+
+    private func section<Content: View>(_ title: String, hint: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).eyebrow()
+            content()
+            if let hint {
+                Text(hint).font(.footnote).foregroundStyle(Theme.muted).contentTransition(.opacity)
+            }
+        }
+    }
+}
+
+/// Two weeks of dates to tap on and off; a dot marks days that already have an outfit.
+private struct DayStrip: View {
+    let days: [String]
+    @Binding var selected: Set<String>
+    let planned: Set<String>
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(days, id: \.self) { date in
+                    let isOn = selected.contains(date)
+                    Button {
+                        withAnimation(Theme.spring) { if isOn { selected.remove(date) } else { selected.insert(date) } }
+                    } label: {
+                        VStack(spacing: 3) {
+                            Text(date == days.first ? "Today" : Day.date(date).formatted(.dateTime.weekday(.abbreviated)))
+                                .font(.caption2.weight(.semibold))
+                            Text(Day.date(date), format: .dateTime.day()).font(.title3.monospacedDigit())
+                            Circle().frame(width: 4, height: 4).opacity(planned.contains(date) ? 1 : 0)
+                        }
+                        .frame(width: 52, height: 70)
+                        .foregroundStyle(isOn ? Theme.canvas : Theme.ink)
+                        .background(isOn ? Theme.ink : Theme.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel(Text(Day.date(date), format: .dateTime.weekday(.wide).day().month()))
+                    .accessibilityValue(planned.contains(date) ? "Has an outfit" : "")
+                    .accessibilityAddTraits(isOn ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+        .scrollIndicators(.hidden)
+        .sensoryFeedback(.selection, trigger: selected)
+    }
+}
+
+private struct Tile: View {
+    let label: String
+    let symbol: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: { withAnimation(Theme.spring) { action() } }) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 20))
+                Text(label).font(.caption.weight(.medium))
+            }
+            .frame(maxWidth: .infinity, minHeight: 64)
+            .foregroundStyle(selected ? Theme.canvas : Theme.ink)
+            .background(selected ? Theme.ink : Theme.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(PressableStyle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -121,7 +205,7 @@ private struct StyleMenu: View {
     var body: some View {
         Menu {
             Picker("Style", selection: $style) {
-                ForEach(presetStyles, id: \.self) { Text($0) }
+                ForEach(presetStyles + (presetStyles.contains(style) ? [] : [style]), id: \.self) { Text($0) }
             }
         } label: {
             HStack(spacing: 4) {
