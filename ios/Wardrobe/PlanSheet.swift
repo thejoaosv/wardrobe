@@ -10,10 +10,16 @@ struct PlanForm: View {
     @State private var mixStyles = false
     @State private var style = "Casual"
     @State private var styles = Array(repeating: "Casual", count: 7)
+    @State private var weather = "auto"
 
     private var dates: [Date] {
         let start = Calendar.current.date(byAdding: .day, value: startsTomorrow ? 1 : 0, to: Calendar.current.startOfDay(for: .now))!
         return (0..<count).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: start) }
+    }
+
+    private var weatherHint: String {
+        ["warm": "Just a top, no layers.", "mild": "A light layer when the style suits it.", "cold": "A hoodie or sweater over the top, and a jacket if you have one.", "rain": "A jacket on top."][weather]
+            ?? "Layers picked for the time of year."
     }
 
     var body: some View {
@@ -32,6 +38,19 @@ struct PlanForm: View {
                         ForEach([1, 3, 5, 7], id: \.self) { Text($0 == 1 ? "1 day" : "\($0) days").tag($0) }
                     }
                     .pickerStyle(.segmented)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Weather").eyebrow()
+                    Picker("Weather", selection: $weather) {
+                        Text("Auto").tag("auto")
+                        Text("Warm").tag("warm")
+                        Text("Mild").tag("mild")
+                        Text("Cold").tag("cold")
+                        Text("Rain").tag("rain")
+                    }
+                    .pickerStyle(.segmented)
+                    Text(weatherHint).font(.footnote).foregroundStyle(Theme.muted)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -63,7 +82,7 @@ struct PlanForm: View {
         .scrollBounceBehavior(.basedOnSize)
         .safeAreaInset(edge: .bottom) {
             Button(count == 1 ? "Style my day" : "Style \(count) days") {
-                let days = dates.enumerated().map { PlanDay(date: $1, style: mixStyles ? styles[$0] : style) }
+                let days = dates.enumerated().map { PlanDay(date: $1, style: mixStyles ? styles[$0] : style, weather: weather) }
                 Task { await store.generate(days) }
                 dismiss()
             }

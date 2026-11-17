@@ -197,11 +197,14 @@ private struct PlanFooter: View {
     }
 
     private func restyle() {
-        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style)]) }
+        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, weather: plan.weather ?? "auto")]) }
     }
 }
 
-/// The outfit laid out as it is worn: layer and top above bottoms, shoes at the feet.
+/// Where each top sits when one, two or three are layered: outermost at the back right, base top in front.
+let topFan: [[(x: CGFloat, width: CGFloat)]] = [[(0.5, 0.82)], [(0.62, 0.7), (0.4, 0.66)], [(0.68, 0.6), (0.5, 0.6), (0.32, 0.58)]]
+
+/// The outfit laid out as it is worn: layers and top above bottoms, shoes at the feet.
 struct DressedOutfit: View {
     let items: [Item]
     var plan: Plan?
@@ -209,8 +212,7 @@ struct DressedOutfit: View {
     private func first(_ part: String) -> Item? { items.first { $0.part == part } }
 
     var body: some View {
-        let top = first("upperbody")
-        let layer = first("wholebody_up")
+        let tops = ["wholebody_up", "midlayer", "upperbody"].compactMap(first)
         let bottom = first("lowerbody")
         let shoes = first("shoes")
         let accessory = first("accessories_up")
@@ -219,33 +221,29 @@ struct DressedOutfit: View {
             let height = geometry.size.height
             // Cutouts carry ~6% padding, so zones overlap slightly to read as one figure.
             ZStack {
-                if let layer, top != nil {
-                    GarmentPiece(item: layer, order: 0, plan: plan)
-                        .frame(width: width * 0.7, height: height * 0.4)
-                        .position(x: width * 0.62, y: height * 0.2)
-                }
-                if let upper = top ?? layer {
-                    GarmentPiece(item: upper, order: 1, plan: plan)
-                        .frame(width: width * (layer != nil && top != nil ? 0.66 : 0.82), height: height * 0.4)
-                        .position(x: width * (layer != nil && top != nil ? 0.4 : 0.5), y: height * 0.21)
-                        .zIndex(2)
+                ForEach(Array(tops.enumerated()), id: \.element.id) { index, top in
+                    let slot = topFan[tops.count - 1][index]
+                    GarmentPiece(item: top, order: index, plan: plan)
+                        .frame(width: width * slot.width, height: height * 0.4)
+                        .position(x: width * slot.x, y: height * (0.2 + 0.005 * CGFloat(index)))
+                        .zIndex(Double(index) + 1)
                 }
                 if let bottom {
-                    GarmentPiece(item: bottom, order: 2, plan: plan)
+                    GarmentPiece(item: bottom, order: tops.count, plan: plan)
                         .frame(width: width * 0.8, height: height * 0.46)
                         .position(x: width * 0.5, y: height * 0.6)
-                        .zIndex(1)
+                        .zIndex(0.5)
                 }
                 if let shoes {
-                    GarmentPiece(item: shoes, order: 3, plan: plan)
+                    GarmentPiece(item: shoes, order: tops.count + 1, plan: plan)
                         .frame(width: width * 0.48, height: height * 0.16)
                         .position(x: width * 0.5, y: height * 0.91)
                 }
                 if let accessory {
-                    GarmentPiece(item: accessory, order: 4, plan: plan)
+                    GarmentPiece(item: accessory, order: tops.count + 2, plan: plan)
                         .frame(width: width * 0.26, height: height * 0.14)
                         .position(x: width * 0.88, y: height * 0.08)
-                        .zIndex(3)
+                        .zIndex(5)
                 }
             }
         }
@@ -272,7 +270,7 @@ private struct GarmentPiece: View {
             .contextMenu {
                 if let plan {
                     Button("Swap this piece", systemImage: "arrow.triangle.2.circlepath") {
-                        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, replace: item.id)]) }
+                        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, weather: plan.weather ?? "auto", replace: item.id)]) }
                     }
                 }
                 Button(item.isAvailable ? "In the wash" : "Back from the wash", systemImage: "washer") {

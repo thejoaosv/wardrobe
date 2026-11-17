@@ -3,14 +3,14 @@ import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 
 import path from "node:path";
 import sharp from "sharp";
 import { createAIProvider } from "./openai-provider.mjs";
-import { DATE, buildPlanPrompt, historyFor, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { DATE, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
 const ASSET_ROOT = "/api/import/assets";
 const LIBRARY_ASSET_ROOT = "/api/import/library";
 const STAGES = new Set(["crop", "garment", "modeled"]);
 const DECISIONS = new Set(["approve", "reject"]);
-const PARTS = new Set(["upperbody", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
+const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 function json(res, status, value) {
@@ -289,7 +289,7 @@ export async function hasTransparentBackground(bytes) {
   return clear / data.length >= 0.05 && corners.every((index) => data[index] <= 8);
 }
 
-const PART_NAMES = { upperbody: "top", wholebody_up: "outer layer", lowerbody: "bottom", shoes: "shoes", accessories_up: "accessory" };
+const PART_NAMES = { upperbody: "base top", midlayer: "mid layer", wholebody_up: "outer layer", lowerbody: "bottom", shoes: "shoes", accessories_up: "accessory" };
 
 // Adapted from the generate-outfits skill template: one portrait of the user in exactly these garments.
 // Reference images after the identity photo: each garment's front cutout, then its back cutout when it has one.
@@ -304,8 +304,8 @@ export function buildTryOnPrompt(plan, garments) {
   const composition = backs.length
     ? `Full body from head to shoes, centered. Pose the person in a natural three-quarter back view, turned about 135 degrees away from the camera and glancing back over the shoulder, so the back of ${backs.join(" and ")} is clearly visible while the face stays recognizable and the front of the outfit is still partly readable.`
     : "Full body from head to shoes, centered, relaxed mostly front-facing pose with arms away from the torso so every garment stays readable.";
-  const layered = garments.some((item) => item.part === "wholebody_up")
-    ? "\nLayering: wear the outer layer naturally over the top so both stay identifiable. Only open it if the reference shows a real full front zipper or buttons; never invent a closure."
+  const layered = garments.some((item) => item.part === "wholebody_up" || item.part === "midlayer")
+    ? "\nLayering: wear the layers in order, base top innermost, then the mid layer, then the outer layer, so each stays identifiable (a collar or hem of the inner layer may show). Only open a layer if its reference shows a real full front zipper or buttons; never invent a closure."
     : "";
   return `Use case: identity-preserve
 Asset type: vertical outfit try-on photograph
@@ -346,9 +346,9 @@ function stageState() {
   return { status: "pending", decision: null, attempts: 0, assetUrl: null, failedAssetUrl: null, cleanupPreviewUrl: null, cleanupTolerance: 46, cleanupDiagnostics: null, error: null, prompt: null, updatedAt: null };
 }
 
-const ANALYZE_PROMPT = "Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody, wholebody_up, lowerbody, accessories_up, shoes. Suggest a concise specific name, primary hex color, optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags.";
+const ANALYZE_PROMPT = "Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Suggest a concise specific name, primary hex color, optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags.";
 
-const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: ["upperbody", "wholebody_up", "lowerbody", "accessories_up", "shoes"] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "tags", "boundingBox"] } } }, required: ["items"] };
+const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "tags", "boundingBox"] } } }, required: ["items"] };
 
 async function analyzeClothes(ai, image) {
   const parsed = await ai.json({ prompt: ANALYZE_PROMPT, images: [image], schema: ANALYZE_SCHEMA, kind: "vision" })
@@ -423,6 +423,7 @@ export function wardrobeImportApi(options = {}) {
     const days = input.days.map((day) => ({
       date: typeof day?.date === "string" && DATE.test(day.date) && !Number.isNaN(Date.parse(day.date)) ? day.date : null,
       style: typeof day?.style === "string" ? day.style.trim().slice(0, 80) || "everyday" : "everyday",
+      weather: WEATHERS.has(day?.weather) ? day.weather : "auto",
       replace: typeof day?.replace === "string" ? day.replace : undefined,
     }));
     if (days.some((day) => !day.date) || new Set(days.map((day) => day.date)).size !== days.length) throw Object.assign(new Error("Each day needs a unique YYYY-MM-DD date"), { status: 400 });
@@ -447,7 +448,7 @@ export function wardrobeImportApi(options = {}) {
     const stylist = (text) => ai.json({ prompt: text, schema: planSchema }).then((result) => validatePlan(result, { items, days }))
       .catch((error) => { throw Object.assign(error, { status: 502 }); });
     let planned = await stylist(prompt);
-    const issues = [...planIssues(plans, planned, items), ...swapIssues(days, planned, library)];
+    const issues = [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items)];
     if (issues.length) {
       const retry = `${prompt}\n\nA previous attempt broke these rules; avoid them: ${issues.join("; ")}.`;
       planned = await stylist(retry);

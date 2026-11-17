@@ -33,7 +33,7 @@ Open [localhost:5173](http://localhost:5173).
 
 `ios/` contains Valet, a native SwiftUI app named after the valet stand where you lay out tomorrow's clothes. It talks to the server above:
 
-- **Plan**: generate outfits for 1–14 days, with one style for all days or a style per day. Swipe a day to restyle or delete it.
+- **Plan**: generate outfits for 1–14 days, with one style for all days or a style per day, and the weather. Every outfit has a base top (t-shirt, shirt); cold days add a hoodie or sweater over it and a jacket on top. Swipe a day to restyle or delete it.
 - **Closet**: tap a piece to mark it as in the laundry (unavailable) or available again. "Laundry done" returns everything at once.
 - **Import**: pick photos from your camera roll and review each crop and cutout.
 - **Try on**: ask for a photo of yourself wearing a planned outfit (needs `data/model-reference.png`).

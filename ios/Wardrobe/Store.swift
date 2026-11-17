@@ -27,6 +27,7 @@ nonisolated struct Plan: Codable, Identifiable, Hashable {
     var id: String { date }
     let date: String
     var style: String
+    var weather: String?
     var name: String
     var garmentIds: [String]
     var reason: String
@@ -63,14 +64,14 @@ nonisolated struct ServerConfig: Codable {
     var modelReference: String
 }
 
-struct PlanDay: Hashable { var date: Date; var style: String; var replace: String? = nil }
+struct PlanDay: Hashable { var date: Date; var style: String; var weather = "auto"; var replace: String? = nil }
 
 nonisolated enum Parts {
-    static let order = ["upperbody", "wholebody_up", "lowerbody", "shoes", "accessories_up"]
+    static let order = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"]
     /// Mirrors DEFAULT_WEARS in scripts/outfit-planner.mjs.
-    static let defaultWears = ["upperbody": 1, "lowerbody": 3, "wholebody_up": 5, "shoes": 7, "accessories_up": 7]
+    static let defaultWears = ["upperbody": 1, "midlayer": 3, "lowerbody": 3, "wholebody_up": 5, "shoes": 7, "accessories_up": 7]
     static func label(_ part: String) -> String {
-        ["upperbody": "Tops", "wholebody_up": "Jackets", "lowerbody": "Bottoms", "shoes": "Shoes", "accessories_up": "Accessories"][part] ?? part
+        ["upperbody": "Tops", "midlayer": "Sweaters & hoodies", "wholebody_up": "Jackets", "lowerbody": "Bottoms", "shoes": "Shoes", "accessories_up": "Accessories"][part] ?? part
     }
 }
 
@@ -217,7 +218,7 @@ final class Store {
         defer { planningDates.subtract(dates) }
         await run {
             let body = days.map { day in
-                var entry = ["date": Day.string(day.date), "style": day.style]
+                var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather]
                 entry["replace"] = day.replace
                 return entry
             }

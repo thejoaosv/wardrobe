@@ -6,6 +6,7 @@ const API = "/api/import/jobs";
 const CONFIG_API = "/api/import/config";
 const PARTS = [
   ["upperbody", "Tops"],
+  ["midlayer", "Sweaters & hoodies"],
   ["wholebody_up", "Jackets"],
   ["lowerbody", "Bottoms"],
   ["accessories_up", "Accessories"],

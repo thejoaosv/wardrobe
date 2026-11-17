@@ -3,7 +3,7 @@ import test from "node:test";
 import sharp from "sharp";
 import { buildTryOnPrompt, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
 import { pickModels } from "./openai-provider.mjs";
-import { duplicateCombos, historyFor, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { duplicateCombos, historyFor, layerIssues, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const items = [
   { id: "tee", part: "upperbody" },
@@ -94,6 +94,20 @@ test("try-on references back cutouts and turns the pose when a piece has one", (
   const withBack = [{ ...front[0], backImage: "/a-back.png" }, front[1]];
   assert.deepEqual(tryOnReferences(withBack).map((ref) => `${ref.item.name}:${ref.side}`), ["Rugby shirt:front", "Rugby shirt:back", "Jeans:front"]);
   const prompt = buildTryOnPrompt(plan, withBack);
-  assert.match(prompt, /Image 3: exact top reference \(Rugby shirt\), back view/);
+  assert.match(prompt, /Image 3: exact base top reference \(Rugby shirt\), back view/);
   assert.match(prompt, /three-quarter back view.*back of Rugby shirt/);
+});
+
+test("layerIssues follows the weather only when the wardrobe allows it", () => {
+  const wardrobe = [...items, { id: "hoodie", part: "midlayer" }, { id: "shell", part: "wholebody_up" }];
+  const day = (weather) => [{ date: "2026-11-16", weather }];
+  const worn = (...garmentIds) => [{ date: "2026-11-16", garmentIds }];
+  assert.match(layerIssues(day("cold"), worn("tee", "jeans"), wardrobe)[0], /midlayer/);
+  assert.deepEqual(layerIssues(day("cold"), worn("tee", "hoodie", "jeans"), wardrobe), []);
+  assert.match(layerIssues(day("warm"), worn("tee", "hoodie", "jeans"), wardrobe)[0], /warm/);
+  assert.match(layerIssues(day("rain"), worn("tee", "jeans"), wardrobe)[0], /outer/);
+  // Nothing to layer with is not a rule break.
+  assert.deepEqual(layerIssues(day("cold"), worn("tee", "jeans"), items), []);
+  // A midlayer alone is not a base top.
+  assert.throws(() => validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["hoodie", "jeans"] }] }, { items: wardrobe, days: day("cold") }), /no usable outfit/);
 });

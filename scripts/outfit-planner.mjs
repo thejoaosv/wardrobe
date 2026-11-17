@@ -2,9 +2,10 @@ const DAY = 24 * 60 * 60 * 1000;
 export const DATE = /^\d{4}-\d{2}-\d{2}$/;
 // Garments worn within this many days of a target date count as "recent".
 export const SPACING_DAYS = 4;
+export const WEATHERS = new Set(["auto", "warm", "mild", "cold", "rain"]);
 
 // How many times a piece is usually worn before it needs washing, when the user hasn't set it.
-export const DEFAULT_WEARS = { upperbody: 1, lowerbody: 3, wholebody_up: 5, shoes: 7, accessories_up: 7 };
+export const DEFAULT_WEARS = { upperbody: 1, midlayer: 3, lowerbody: 3, wholebody_up: 5, shoes: 7, accessories_up: 7 };
 export const wearsFor = (item) => Number.isInteger(item?.wears) ? item.wears : DEFAULT_WEARS[item?.part] ?? 1;
 
 const dayNumber = (date) => Date.parse(`${date}T00:00:00Z`) / DAY;
@@ -57,7 +58,8 @@ Outfits already worn or planned on nearby dates:
 ${JSON.stringify(history)}
 
 Rules:
-- Each outfit has one upperbody top and one lowerbody bottom, plus optional wholebody_up outer layer, shoes, and at most one accessories_up item.
+- Each outfit has exactly one upperbody base top (t-shirt, shirt) and one lowerbody bottom, plus optional midlayer (hoodie, sweater), wholebody_up outer layer (jacket, coat, rain jacket), shoes, and at most one accessories_up item. A midlayer or outer layer never replaces the base top; it goes over it, so a cold day can stack base top + midlayer + outer layer.
+- Dress for each day's weather: warm means base top only, no midlayer or outer layer; mild allows one light layer when the style suits it; cold needs a midlayer, plus an outer layer when one is available; rain needs an outer layer when one is available, plus a midlayer if it is also chilly; auto means judge from the date's usual season.
 - Match each day's requested style. Use color harmony: tonal or analogous palettes, one statement piece at most.
 - wears is how many times a garment can be worn before it needs washing. Within ${SPACING_DAYS} days either side of any date, a garment may be worn on at most wears dates in total, counting the history and the other days in this plan. So a wears-1 tee should not repeat within ${SPACING_DAYS} days, while wears-3 jeans can be worn on up to three close or consecutive days. Only go past a limit when the wardrobe has no alternative for that part; then reuse the one worn longest ago, preferring neutral basics.
 - Never repeat an exact garment combination from the history or within this plan.
@@ -75,7 +77,7 @@ const pick = ({ id, name, part, color, secondaryColor, tags }) => ({ id, name, p
 export function validatePlan(result, { items, days }) {
   const byId = new Map(items.map((item) => [item.id, item]));
   const outfits = new Map((result?.outfits || []).map((outfit) => [outfit.date, outfit]));
-  return days.map(({ date, style }) => {
+  return days.map(({ date, style, weather }) => {
     const outfit = outfits.get(date);
     const seen = new Set();
     const garmentIds = [...new Set(outfit?.garmentIds || [])].filter((id) => {
@@ -85,7 +87,7 @@ export function validatePlan(result, { items, days }) {
       return true;
     });
     if (!seen.has("upperbody") || !seen.has("lowerbody")) throw new Error(`The stylist returned no usable outfit for ${date}`);
-    return { date, style, name: String(outfit.name || "Outfit").slice(0, 80), garmentIds, reason: String(outfit.reason || "").slice(0, 400) };
+    return { date, style, weather, name: String(outfit.name || "Outfit").slice(0, 80), garmentIds, reason: String(outfit.reason || "").slice(0, 400) };
   });
 }
 
@@ -125,6 +127,19 @@ export function planIssues(plans, planned, items) {
     for (const date of duplicateCombos(merged)) if (dates.has(date)) issues.push(`${date} repeats an earlier outfit combination`);
   }
   return issues;
+}
+
+// Layers that ignore the day's weather although the wardrobe could have followed it.
+export function layerIssues(days, planned, items) {
+  const parts = (date) => new Set((planned.find((plan) => plan.date === date)?.garmentIds || []).map((id) => items.find((item) => item.id === id)?.part));
+  const has = (part) => items.some((item) => item.part === part);
+  return days.filter((day) => !day.replace).flatMap(({ date, weather }) => {
+    const worn = parts(date);
+    if (weather === "warm" && (worn.has("midlayer") || worn.has("wholebody_up"))) return [`${date} is warm: drop the midlayer and outer layer`];
+    if (weather === "cold" && has("midlayer") && !worn.has("midlayer")) return [`${date} is cold: add a midlayer over the base top`];
+    if (weather === "rain" && has("wholebody_up") && !worn.has("wholebody_up")) return [`${date} is rainy: add an outer layer`];
+    return [];
+  });
 }
 
 // Swaps that kept every other piece and put one different piece of the same part in place of the swapped one pass.

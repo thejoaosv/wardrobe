@@ -34,7 +34,8 @@ Assign each worker a disjoint set of outfit IDs plus the exact identity and garm
 
 Read `data/library.json`. Resolve `/api/import/library/FILENAME` assets to `data/imported/FILENAME`. Group items by:
 
-- `upperbody` — tops
+- `upperbody` — base tops: t-shirts, shirts, polos (every outfit needs one)
+- `midlayer` — hoodies, sweaters and fleeces worn over the base top
 - `wholebody_up` — jackets and outer layers
 - `lowerbody` — bottoms
 - `accessories_up` — optional accessories

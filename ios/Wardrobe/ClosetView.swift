@@ -6,10 +6,10 @@ struct ClosetView: View {
     @State private var opened: Item?
 
     enum Filter: String, CaseIterable {
-        case all = "All", tops = "Tops", layers = "Jackets", bottoms = "Bottoms", shoes = "Shoes", accessories = "Accessories", wash = "In the wash"
+        case all = "All", tops = "Tops", sweaters = "Sweaters", layers = "Jackets", bottoms = "Bottoms", shoes = "Shoes", accessories = "Accessories", wash = "In the wash"
 
         var part: String? {
-            [.tops: "upperbody", .layers: "wholebody_up", .bottoms: "lowerbody", .shoes: "shoes", .accessories: "accessories_up"][self]
+            [.tops: "upperbody", .sweaters: "midlayer", .layers: "wholebody_up", .bottoms: "lowerbody", .shoes: "shoes", .accessories: "accessories_up"][self]
         }
     }
 
