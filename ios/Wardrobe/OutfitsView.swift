@@ -368,7 +368,7 @@ private struct TryOnBadge: View {
             switch plan.tryOn?.status {
             case "ready":
                 Button { showing = true } label: {
-                    AsyncImage(url: store.url(plan.tryOn?.image), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                    AsyncImage(url: store.url(plan.tryOn?.image, width: 300), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                         if case .success(let image) = phase { image.resizable().scaledToFill().transition(.opacity) } else { Theme.ink.opacity(0.06) }
                     }
                     .frame(width: 64, height: 96)
@@ -418,7 +418,7 @@ private struct TryOnViewer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            AsyncImage(url: store.url(plan.tryOn?.image)) { phase in
+            AsyncImage(url: store.url(plan.tryOn?.image, width: 1600)) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFit() } else { Color.clear }
             }
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))

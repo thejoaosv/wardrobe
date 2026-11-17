@@ -67,7 +67,7 @@ struct GarmentImage: View {
     let item: Item?
 
     var body: some View {
-        AsyncImage(url: store.url(item?.image), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+        AsyncImage(url: store.url(item?.image, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
             if case .success(let image) = phase {
                 image.resizable().scaledToFit().transition(.opacity)
             } else {
@@ -141,7 +141,10 @@ func uploadJPEG(_ data: Data) -> Data? {
 func uploadJPEG(_ image: UIImage) -> Data? {
     let scale = min(1, 2048 / max(image.size.width, image.size.height))
     let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-    return UIGraphicsImageRenderer(size: size).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }.jpegData(compressionQuality: 0.85)
+    // The default format renders at the screen's scale, which turned 2048 into 6144 pixels.
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }.jpegData(compressionQuality: 0.85)
 }
 
 /// The system camera, for photographing clothes without leaving the app.

@@ -25,7 +25,7 @@ struct WardrobeApp: App {
                 .task(id: store.isWorking) {
                     // Status lines change every few seconds while the AI checks and retries its work.
                     while store.isWorking && !Task.isCancelled {
-                        await store.loadProgress()
+                        await store.poll()
                         try? await Task.sleep(for: .seconds(2))
                     }
                     store.progress = [:]
@@ -37,12 +37,36 @@ struct WardrobeApp: App {
                         Task { await store.refresh() }
                     }
                 }
-                .alert("Something went wrong", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    Text(store.error ?? "")
-                }
+                .modifier(ErrorAlert(store: store, active: store.sheetDepth == 0))
         }
+    }
+}
+
+/// Shows the store's error as an alert. The root shows it only while no sheet is open: presenting an alert from
+/// under a sheet makes SwiftUI close the sheet, which is how a failed tap used to throw the user out of a sheet.
+struct ErrorAlert: ViewModifier {
+    // Passed in: at the root this sits outside .environment(store).
+    let store: Store
+    var active = true
+
+    func body(content: Content) -> some View {
+        content.alert("Something went wrong", isPresented: Binding(get: { active && store.error != nil }, set: { if !$0 { store.error = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.error ?? "")
+        }
+    }
+}
+
+/// Put on a sheet's content: it takes over showing errors while it is open.
+struct SheetErrors: ViewModifier {
+    @Environment(Store.self) private var store
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(ErrorAlert(store: store))
+            .onAppear { store.sheetDepth += 1 }
+            .onDisappear { store.sheetDepth -= 1 }
     }
 }
 
@@ -112,6 +136,7 @@ private struct AddSheet: View {
             }
         }
         .sensoryFeedback(.selection, trigger: mode)
+        .modifier(SheetErrors())
         .presentationDragIndicator(.visible)
         .presentationBackground(Theme.canvas)
     }

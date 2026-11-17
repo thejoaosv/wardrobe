@@ -11,7 +11,10 @@ struct ImportForm: View {
     private static let waiting: Set<String> = ["queued", "processing", "pending"]
     private var needsYou: [Job] { store.jobs.filter { !Self.waiting.contains($0.current.stage.status) } }
     private var working: [Job] { store.jobs.filter { Self.waiting.contains($0.current.stage.status) } }
-    private var busy: Bool { !store.detecting.isEmpty || !working.isEmpty }
+    private var searching: [Detection] { store.detections.filter(\.isWorking) }
+    /// Photos that failed or held no clothes, shown until dismissed.
+    private var notices: [Detection] { store.detections.filter { $0.status == "failed" || ($0.status == "done" && $0.found == 0) } }
+    private var busy: Bool { !store.uploading.isEmpty || !searching.isEmpty || !working.isEmpty }
     private var ready: Bool { store.config?.ready == true }
 
     var body: some View {
@@ -24,8 +27,12 @@ struct ImportForm: View {
                         .font(.subheadline).foregroundStyle(Theme.muted)
                 }
 
-                if store.jobs.isEmpty && store.detecting.isEmpty {
+                if store.jobs.isEmpty && !busy && notices.isEmpty {
                     Tips().transition(.opacity)
+                }
+
+                ForEach(notices) { notice in
+                    NoticeRow(detection: notice).transition(.opacity)
                 }
 
                 if !needsYou.isEmpty {
@@ -36,8 +43,11 @@ struct ImportForm: View {
 
                 if busy {
                     group("Working on it") {
-                        ForEach(store.detecting, id: \.self) { id in
-                            WorkingRow(kind: nil, title: "New photo", status: store.progress["detect:\(id)"] ?? "Finding clothes…")
+                        ForEach(store.uploading, id: \.self) { _ in
+                            WorkingRow(kind: nil, title: "New photo", status: "Sending to your Mac…")
+                        }
+                        ForEach(searching) { detection in
+                            WorkingRow(kind: nil, title: "New photo", status: detection.message ?? "Finding clothes…")
                         }
                         ForEach(working) { job in
                             WorkingRow(kind: GarmentKind(part: job.metadata.part, name: job.metadata.name), title: job.metadata.name,
@@ -49,7 +59,8 @@ struct ImportForm: View {
             }
             .padding(24)
             .animation(Theme.spring, value: store.jobs.map(\.current.stage.status))
-            .animation(Theme.spring, value: store.detecting)
+            .animation(Theme.spring, value: store.uploading)
+            .animation(Theme.spring, value: store.detections)
         }
         .safeAreaInset(edge: .bottom) {
             start
@@ -138,6 +149,30 @@ private struct Tips: View {
     }
 }
 
+/// A photo that failed or had no clothes in it, until the user dismisses it.
+private struct NoticeRow: View {
+    @Environment(Store.self) private var store
+    let detection: Detection
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: detection.status == "failed" ? "exclamationmark.triangle" : "eye.slash").font(.title3).frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(detection.status == "failed" ? "Couldn't read a photo" : "No clothes found in a photo").font(.body.weight(.medium))
+                Text(detection.status == "failed" ? detection.error ?? "Try importing it again." : "Try one where the clothes fill more of the frame.")
+                    .font(.footnote).foregroundStyle(Theme.muted).lineLimit(3)
+            }
+            Spacer(minLength: 0)
+            Button("Dismiss", systemImage: "xmark") { Task { await store.dismissDetection(detection) } }
+                .labelStyle(.iconOnly).font(.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
+                .frame(width: 32, height: 32).contentShape(Rectangle())
+        }
+        .foregroundStyle(Theme.ink)
+        .padding(14)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
 /// A compact line for a photo or piece the AI is still working on.
 private struct WorkingRow: View {
     let kind: GarmentKind?
@@ -172,7 +207,7 @@ private struct JobCard: View {
         let (name, stage) = job.current
         let isCrop = name == "crop"
         VStack(alignment: .leading, spacing: 14) {
-            AsyncImage(url: store.url(stage.assetUrl), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+            AsyncImage(url: store.url(stage.assetUrl, width: 1000), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) }
                 else { GarmentSkeleton(kind: GarmentKind(part: job.metadata.part, name: job.metadata.name)).padding(.vertical, 16) }
             }
@@ -185,12 +220,14 @@ private struct JobCard: View {
                 Text(job.metadata.name).font(.display(22))
             }
 
+            let busy = store.reviewing.contains(job.id)
             if stage.status == "failed" {
                 Text(stage.error ?? "That didn't work.").font(.footnote).foregroundStyle(Theme.muted).lineLimit(3)
                 HStack(spacing: 10) {
                     Button("Try again") { Task { await store.review(job, "regenerate") } }.buttonStyle(PrimaryButtonStyle())
                     Button("Discard") { Task { await store.review(job, "reject") } }.buttonStyle(QuietButtonStyle())
                 }
+                .disabled(busy)
             } else {
                 if let warnings = stage.warnings, !warnings.isEmpty {
                     ReviewerNote(warnings: warnings)
@@ -204,6 +241,9 @@ private struct JobCard: View {
                     Button(isCrop ? "Skip" : "Discard", systemImage: "xmark") { Task { await store.review(job, "reject") } }
                         .labelStyle(.iconOnly).buttonStyle(QuietButtonStyle())
                 }
+                // One decision at a time per piece; the next tap waits for the Mac's answer.
+                .disabled(busy)
+                .opacity(busy ? 0.5 : 1)
             }
         }
         .padding(18)

@@ -147,6 +147,7 @@ struct ItemSheet: View {
                 Text("It disappears from your closet and future outfits.")
             }
         }
+        .modifier(SheetErrors())
         .presentationDetents([.large])
         .presentationBackground(Theme.canvas)
         .presentationDragIndicator(.visible)
@@ -211,7 +212,7 @@ struct ItemSheet: View {
                     if backStatus == "processing" {
                         working(live.backImage == nil ? "Cutting out the back…" : "Redoing the back…")
                     } else {
-                        AsyncImage(url: store.url(live.backImage), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                        AsyncImage(url: store.url(live.backImage, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                             if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
                         }
                         .garmentLift()

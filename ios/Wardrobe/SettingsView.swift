@@ -197,7 +197,7 @@ private struct PhotoPage: View {
 
     var body: some View {
         Page(title: "Photo of you") {
-            AsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)") : nil) { phase in
+            AsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)", width: 900) : nil) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFill() } else {
                     Image(systemName: "person.crop.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.muted)
                 }

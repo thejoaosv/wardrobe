@@ -85,6 +85,23 @@ nonisolated struct ServerSettings: Codable {
     var wears: [String: Int]?
 }
 
+/// A photo the Mac is searching for clothes in the background.
+nonisolated struct Detection: Codable, Identifiable, Hashable {
+    let id: String
+    var status: String
+    var message: String?
+    var found: Int
+    var error: String?
+    var isWorking: Bool { status == "working" }
+}
+
+/// A day the Mac is styling in the background; failed ones wait until the app has shown them.
+nonisolated struct Styling: Codable, Hashable {
+    let date: String
+    var status: String
+    var error: String?
+}
+
 struct PlanDay: Hashable { var date: Date; var style: String; var weather = "auto"; var replace: String? = nil }
 
 nonisolated enum Parts {
@@ -128,27 +145,37 @@ final class Store {
     /// Changes when the photo of the user is replaced, so its preview reloads.
     var referenceStamp = Date.now
     /// The oldest server API this app works with; see API_VERSION in scripts/import-job-api.mjs.
-    static let minimumServerAPI = 4
+    static let minimumServerAPI = 5
     var serverIsOutdated: Bool { config != nil && (version?.api ?? 0) < Self.minimumServerAPI }
     var error: String?
+    /// Open sheets; while one is up, it shows errors itself, because an alert on the root view would close it.
+    var sheetDepth = 0
     /// Why the last refresh could not reach the server, shown in the Server sheet.
     var connectionError: String?
     /// The sheet the root view presents (chooser, plan or import).
     var sheet: AppSheet?
     /// Days the stylist is working on right now, by date; their weather shapes the loading skeleton.
     var planning: [String: PlanDay] = [:]
-    var planningDates: Set<String> { Set(planning.keys) }
-    /// Photos being searched for clothes, by the id the server reports their progress under.
-    var detecting: [String] = []
+    var planningDates: Set<String> { Set(planning.keys).union(styling.filter { $0.status == "working" }.map(\.date)) }
+    var styling: [Styling] = []
+    /// Photos still uploading, then searched on the Mac.
+    var uploading: [String] = []
+    var detections: [Detection] = []
+    /// Import jobs with a review action in flight, so their buttons can't be tapped twice.
+    var reviewing: Set<String> = []
     /// What the AI is doing right now ("Checking the cutout…", "Retrying (2/3): …"), keyed like "job:<id>" or "plan:<date>".
     var progress: [String: String] = [:]
 
-    // AI calls through Codex or the API can take minutes.
+    // Long AI work runs in the background on the Mac, so every request here is short.
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 600
+        configuration.timeoutIntervalForRequest = 90
+        configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }()
+
+    /// Errors worth one more try: Wi-Fi blips, a sleeping phone, or the server closing an idle connection as it was reused.
+    private static let transient: Set<URLError.Code> = [.networkConnectionLost, .timedOut, .notConnectedToInternet, .cannotConnectToHost]
 
     /// The typed address, tolerating a missing scheme and stray whitespace.
     var baseURL: URL? {
@@ -156,14 +183,18 @@ final class Store {
         return URL(string: typed.contains("://") ? typed : "http://\(typed)")
     }
 
-    func url(_ path: String?) -> URL? {
-        guard let path else { return nil }
-        return URL(string: path, relativeTo: baseURL)?.absoluteURL
+    /// width asks the server for a WebP preview that size instead of the full PNG.
+    func url(_ path: String?, width: Int? = nil) -> URL? {
+        guard let path, let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else { return nil }
+        guard let width, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "w", value: String(width))]
+        return components.url
     }
 
     func item(_ id: String) -> Item? { items.first { $0.id == id } }
 
-    private func send<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> T {
+    /// retry repeats the request after a transient network error; only for requests the server handles safely twice.
+    private func send<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil, retry: Bool? = nil) async throws -> T {
         guard let url = url(path) else { throw ServerError(message: "Invalid server address") }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -171,7 +202,18 @@ final class Store {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, response) = try await session.data(for: request)
+        let retries = retry ?? ["GET", "PATCH", "DELETE"].contains(method) ? 2 : 0
+        var attempt = 0
+        let (data, response): (Data, URLResponse)
+        while true {
+            do {
+                (data, response) = try await session.data(for: request)
+                break
+            } catch let error as URLError where Self.transient.contains(error.code) && attempt < retries {
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(700 * attempt))
+            }
+        }
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
             throw ServerError(message: message ?? "Server error \(http.statusCode)")
@@ -181,7 +223,10 @@ final class Store {
 
     /// Runs an action and surfaces failures as an alert instead of throwing.
     private func run(_ action: () async throws -> Void) async {
-        do { try await action() } catch is CancellationError {} catch let error as URLError where error.code == .cancelled {} catch {
+        do { try await action() } catch is CancellationError {} catch let error as URLError where error.code == .cancelled {} catch let error as URLError where Self.transient.contains(error.code) {
+            print("Wardrobe request failed: \(error)")
+            self.error = "Couldn't reach your Mac. Check that it's awake and on the same Wi-Fi, then try again."
+        } catch {
             print("Wardrobe request failed: \(error)")
             self.error = error.localizedDescription
         }
@@ -198,6 +243,9 @@ final class Store {
             // Older servers lack these; that is what serverIsOutdated reports.
             version = try? await send("/api/import/version")
             settings = try? await send("/api/import/settings")
+            // Searches and styling may have finished while the app was away.
+            if let latest: [Detection] = try? await send("/api/import/detections") { detections = latest }
+            if !planning.isEmpty || !styling.isEmpty { await loadStyling() }
         } catch is CancellationError {
         } catch let error as URLError where error.code == .cancelled {
         } catch {
@@ -286,17 +334,54 @@ final class Store {
         }
     }
 
+    /// Starts styling on the Mac; poll() picks up the result, so leaving the app or losing Wi-Fi meanwhile loses nothing.
     func generate(_ days: [PlanDay]) async {
-        let dates = Set(days.map { Day.string($0.date) })
+        let dates = days.map { Day.string($0.date) }
         for day in days { planning[Day.string(day.date)] = day }
-        defer { for date in dates { planning[date] = nil } }
         await run {
             let body = days.map { day in
                 var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather]
                 entry["replace"] = day.replace
                 return entry
             }
-            plans = try await send("/api/import/plans", method: "POST", body: ["days": body])
+            styling = try await send("/api/import/plans", method: "POST", body: ["days": body, "background": true])
+        }
+        // Not started at all: nothing to wait for.
+        for date in dates where !styling.contains(where: { $0.date == date && $0.status == "working" }) { planning[date] = nil }
+    }
+
+    /// One round of status checks while the AI works: live messages, photos being searched, days being styled.
+    func poll() async {
+        await loadProgress()
+        if !detections.isEmpty || !uploading.isEmpty { await loadDetections() }
+        if !planning.isEmpty || !styling.isEmpty { await loadStyling() }
+    }
+
+    func loadDetections() async {
+        guard let latest: [Detection] = try? await send("/api/import/detections") else { return }
+        let finished = detections.filter(\.isWorking).contains { old in latest.first { $0.id == old.id }?.isWorking != true }
+        detections = latest
+        if finished { await loadJobs() }
+    }
+
+    func dismissDetection(_ detection: Detection) async {
+        detections.removeAll { $0.id == detection.id }
+        await run { detections = try await send("/api/import/detections/\(detection.id)", method: "DELETE") }
+    }
+
+    func loadStyling() async {
+        guard let latest: [Styling] = try? await send("/api/import/plans/styling") else { return }
+        styling = latest
+        let working = Set(latest.filter { $0.status == "working" }.map(\.date))
+        let done = planning.keys.filter { !working.contains($0) }
+        for date in done { planning[date] = nil }
+        if !done.isEmpty { await loadPlans() }
+        if let failed = latest.first(where: { $0.status == "failed" }) {
+            error = "Couldn't style \(Day.date(failed.date).formatted(.dateTime.weekday(.wide))): \(failed.error ?? "try again.")"
+            for entry in latest where entry.status == "failed" {
+                let _: [Styling]? = try? await send("/api/import/plans/styling/\(entry.date)", method: "DELETE")
+            }
+            styling.removeAll { $0.status == "failed" }
         }
     }
 
@@ -306,18 +391,20 @@ final class Store {
 
     func tryOn(_ plan: Plan) async {
         await Notifier.requestPermission()
-        await run { plans = try await send("/api/import/plans/\(plan.date)/try-on", method: "POST", body: [:]) }
+        // Safe to repeat: the server doesn't start a second try-on of the same day.
+        await run { plans = try await send("/api/import/plans/\(plan.date)/try-on", method: "POST", body: [:], retry: true) }
     }
 
     /// AI work is still running on the Mac (cutouts or try-ons), so a notification is worth waiting for.
     var hasPendingWork: Bool {
         plans.contains { $0.tryOn?.status == "processing" }
+            || !uploading.isEmpty || detections.contains(where: \.isWorking)
             || items.contains { $0.back?.status == "processing" || $0.front?.status == "processing" }
             || jobs.contains { ["queued", "processing"].contains($0.current.stage.status) || ($0.current.name == "garment" && $0.current.stage.status == "pending") }
     }
 
     /// Anything the AI is working on that the user is watching.
-    var isWorking: Bool { !planningDates.isEmpty || !detecting.isEmpty || hasPendingWork }
+    var isWorking: Bool { !planning.isEmpty || !uploading.isEmpty || detections.contains(where: \.isWorking) || styling.contains { $0.status == "working" } || hasPendingWork }
 
     func loadProgress() async {
         if let latest: [String: String] = try? await send("/api/import/progress") { progress = latest }
@@ -331,34 +418,36 @@ final class Store {
         await run { jobs = try await send("/api/import/jobs") }
     }
 
+    /// Uploads a photo; the Mac searches it in the background and poll() follows along.
     func importPhoto(_ jpeg: Data) async {
         let id = UUID().uuidString
-        detecting.append(id)
-        defer { detecting.removeAll { $0 == id } }
+        uploading.append(id)
+        defer { uploading.removeAll { $0 == id } }
         await Notifier.requestPermission()
-        // Finding clothes takes a few seconds; keep running if the user leaves and tell them when it's done.
+        // Finishes the upload if the user leaves the app; the rest happens on the Mac.
         let task = UIApplication.shared.beginBackgroundTask(withName: "import")
         defer { UIApplication.shared.endBackgroundTask(task) }
         await run {
-            let found: ImportResult = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())", "clientId": id])
-            if UIApplication.shared.applicationState != .active, !found.jobs.isEmpty {
-                Notifier.post("Ready to review", found.jobs.count == 1 ? "Found 1 piece in your photo." : "Found \(found.jobs.count) pieces in your photo.")
-            }
-            jobs = try await send("/api/import/jobs")
+            // Safe to repeat: the server joins an upload with the same id to the search already running.
+            let detection: Detection = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())", "clientId": id, "background": true], retry: true)
+            detections.removeAll { $0.id == detection.id }
+            detections.append(detection)
         }
     }
 
     /// action is approve, reject or regenerate.
     func review(_ job: Job, _ action: String) async {
+        guard !reviewing.contains(job.id) else { return }
+        reviewing.insert(job.id)
+        defer { reviewing.remove(job.id) }
         await run {
-            let _: Job = try await send("/api/import/jobs/\(job.id)/stages/\(job.current.name)/\(action)", method: "POST", body: [:])
+            // Safe to repeat: the server treats a second approve or discard of the same piece as done.
+            let _: AnyCodable = try await send("/api/import/jobs/\(job.id)/stages/\(job.current.name)/\(action)", method: "POST", body: [:], retry: true)
             jobs = try await send("/api/import/jobs")
             if action == "approve", job.current.name != "crop" { items = try await send("/api/import/wardrobe") }
         }
     }
 }
-
-nonisolated struct ImportResult: Decodable { let jobs: [Job] }
 
 /// Decodes any JSON value when only success matters.
 nonisolated struct AnyCodable: Codable {
