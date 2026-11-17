@@ -1,15 +1,14 @@
 import PhotosUI
 import SwiftUI
 
-/// Connection first, then what the AI does, the photo try-ons use, and about. The changelog hides behind the server version.
+enum SettingsPage: Hashable { case connection, quality, photo, laundry, changelog }
+
+/// A short overview of every setting; each opens its own page, so nothing is piled on top of anything else.
 struct SettingsView: View {
     @Environment(Store.self) private var store
     @Environment(\.openURL) private var openURL
+    @State private var path: [SettingsPage] = []
     @State private var versionTaps = 0
-    @State private var showsChangelog = false
-    @State private var choosingPhoto = false
-    @State private var takingPhoto = false
-    @State private var photoPick: PhotosPickerItem?
 
     private var appVersion: String {
         let info = Bundle.main.infoDictionary
@@ -17,113 +16,218 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        NavigationStack(path: $path) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 30) {
+                    Text("Settings").font(.display(34))
+
+                    Panel {
+                        link(.connection) {
+                            PanelRow(title: store.config == nil ? "Not connected" : "Connected", symbol: store.config == nil ? "wifi.slash" : "desktopcomputer",
+                                     detail: store.serverIsOutdated ? "The server on your Mac needs an update" : store.serverURL) {
+                                RowValue()
+                            }
+                        }
+                    }
+
+                    Panel(title: "Outfits") {
+                        link(.laundry) { PanelRow(title: "Wears before washing", symbol: "washer", detail: "Defaults by type of clothing") { RowValue() } }
+                        link(.photo) {
+                            PanelRow(title: "Photo of you", symbol: "person.crop.rectangle", detail: "For try-ons") {
+                                RowValue(text: store.config?.hasModelReference == true ? "Added" : "Not added")
+                            }
+                        }
+                    }
+
+                    Panel(title: "AI") {
+                        link(.quality) {
+                            PanelRow(title: "Quality checks", symbol: "checkmark.seal", detail: "Checks every result") {
+                                RowValue(text: store.settings?.checks == "fast" ? "Fast" : "Thorough")
+                            }
+                        }
+                        PanelRow(title: "Runs on", symbol: "sparkles") {
+                            Text(["codex": "ChatGPT plan", "api": "API key"][store.config?.provider ?? ""] ?? "Not set up").foregroundStyle(Theme.muted)
+                        }
+                    }
+
+                    Panel(title: "App") {
+                        Button {
+                            if let url = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(url) }
+                        } label: {
+                            PanelRow(title: "Notifications", symbol: "bell", detail: "When cutouts and try-ons are ready") { RowValue(symbol: "arrow.up.right") }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Panel(title: "About") {
+                        PanelRow(title: "Valet") { Text(appVersion).foregroundStyle(Theme.muted) }
+                        // Looks like a plain row; five quick taps open the changelog.
+                        Button {
+                            versionTaps += 1
+                            if versionTaps >= 5, store.version != nil { path.append(.changelog); versionTaps = 0 }
+                        } label: {
+                            PanelRow(title: "Server") {
+                                Text(store.version?.version ?? (store.config == nil ? "Not connected" : "Before 1.2")).foregroundStyle(Theme.muted)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(24)
+            }
+            .background(Theme.canvas.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
+            .refreshable { await store.refresh() }
+            .navigationDestination(for: SettingsPage.self) { page in
+                Group {
+                    switch page {
+                    case .connection: ConnectionPage()
+                    case .quality: QualityPage()
+                    case .photo: PhotoPage()
+                    case .laundry: LaundryPage()
+                    case .changelog: ChangelogPage(releases: store.version?.changelog ?? [])
+                    }
+                }
+                .background(Theme.canvas.ignoresSafeArea())
+            }
+        }
+    }
+
+    private func link<Label: View>(_ page: SettingsPage, @ViewBuilder label: () -> Label) -> some View {
+        NavigationLink(value: page, label: label).buttonStyle(.plain)
+    }
+}
+
+/// A settings sub-page: a serif title and its panels.
+private struct Page<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                Text(title).font(.display(30))
+                content
+            }
+            .padding(24)
+        }
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ConnectionPage: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
         @Bindable var store = store
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("http://my-mac.local:5173", text: $store.serverURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.done)
-                        .onSubmit { Task { await store.refresh() } }
-                    connection
-                } header: {
-                    Text("Your Mac")
-                } footer: {
-                    Text("Run `npm run dev` in the wardrobe folder on your Mac, then enter its address.")
+        Page(title: "Your Mac") {
+            Panel(title: "Server address", footer: "Run `npm run dev` in the wardrobe folder on your Mac, then enter its address, e.g. http://my-mac.local:5173.") {
+                TextField("http://my-mac.local:5173", text: $store.serverURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .onSubmit { Task { await store.refresh() } }
+                    .padding(.horizontal, 18)
+                    .frame(minHeight: 58)
+            }
+
+            Panel(title: "Status") {
+                if store.config != nil {
+                    PanelRow(title: "Connected", symbol: "checkmark.circle.fill", detail: store.version.map { "Server \($0.version)" })
+                } else {
+                    PanelRow(title: "Not connected", symbol: "xmark.circle", detail: store.connectionError)
                 }
-
-                if store.serverIsOutdated {
-                    Section {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Update Wardrobe on your Mac").font(.body.weight(.semibold))
-                                Text("This app needs a newer server. In the wardrobe folder, run `git pull`, then restart `npm run dev`.")
-                                    .font(.footnote).foregroundStyle(Theme.muted)
-                            }
-                        } icon: {
-                            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
-                        }
-                    }
+                Button { Task { await store.refresh() } } label: {
+                    PanelRow(title: "Check again", symbol: "arrow.clockwise")
                 }
+                .buttonStyle(.plain)
+            }
 
-                if let config = store.config {
-                    Section {
-                        LabeledContent("Runs on", value: ["codex": "Your ChatGPT plan", "api": "OpenAI API key"][config.provider ?? ""] ?? "Not set up")
-                        if let settings = store.settings {
-                            Picker("Quality checks", selection: Binding(get: { settings.checks }, set: { value in Task { await store.setChecks(value) } })) {
-                                Text("Thorough").tag("thorough")
-                                Text("Fast").tag("fast")
-                            }
-                        }
-                    } header: {
-                        Text("AI")
-                    } footer: {
-                        Text(store.settings?.checks == "fast"
-                             ? "Fast: results come back sooner, without a second look. Check cutouts yourself."
-                             : "Thorough: every cutout, try-on and photo scan gets a second look and is redone up to 3 times if it's wrong. Slower, but more accurate.")
-                    }
-
-                    Section {
-                        HStack(spacing: 14) {
-                            reference
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Photo of you")
-                                Text(config.hasModelReference ? "Ready for try-ons" : "Not added yet").font(.footnote).foregroundStyle(Theme.muted)
-                            }
-                            Spacer()
-                            Menu(config.hasModelReference ? "Change" : "Add") {
-                                if CameraPicker.isAvailable {
-                                    Button("Take photo", systemImage: "camera") { takingPhoto = true }
-                                }
-                                Button("Choose photo", systemImage: "photo.on.rectangle") { choosingPhoto = true }
-                            }
-                        }
-                    } header: {
-                        Text("Try-ons")
-                    } footer: {
-                        Text("Outfits are shown on this person. A full-body photo in good light, facing the camera, works best.")
-                    }
-                }
-
-                Section("Notifications") {
-                    Button("Notification settings") {
-                        if let url = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(url) }
-                    }
-                }
-
-                Section {
-                    LabeledContent("Valet", value: appVersion)
-                    // Looks like a plain row; five taps open the changelog.
-                    Button {
-                        versionTaps += 1
-                        if versionTaps >= 5, store.version != nil { showsChangelog = true; versionTaps = 0 }
-                    } label: {
-                        LabeledContent("Server", value: store.version?.version ?? (store.config == nil ? "Not connected" : "Before 1.2"))
-                    }
-                    .foregroundStyle(Theme.ink)
-                } header: {
-                    Text("About")
+            if store.serverIsOutdated {
+                Panel(title: "Update needed", footer: "This app needs a newer server. In the wardrobe folder on your Mac, run `git pull`, then restart `npm run dev`.") {
+                    PanelRow(title: "Server is out of date", symbol: "arrow.triangle.2.circlepath")
                 }
             }
-            .scrollContentBackground(.hidden)
-            .scrollDismissesKeyboard(.interactively)
-            .background(Theme.canvas.ignoresSafeArea())
-            .navigationTitle("Settings")
-            .navigationDestination(isPresented: $showsChangelog) { ChangelogView(releases: store.version?.changelog ?? []) }
-            .refreshable { await store.refresh() }
         }
-        .photosPicker(isPresented: $choosingPhoto, selection: $photoPick, matching: .images)
-        .onChange(of: photoPick) { _, pick in
-            guard let pick else { return }
-            photoPick = nil
+    }
+}
+
+private struct QualityPage: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        Page(title: "Quality checks") {
+            Text("After the AI finds clothes, cuts them out or dresses you, a second look can check its work against your photo.")
+                .font(.subheadline).foregroundStyle(Theme.muted)
+            VStack(spacing: 12) {
+                option("thorough", "Thorough", "Every result gets a second look and is redone up to 3 times if the text, colors or shape are wrong. Slower, more accurate.")
+                option("fast", "Fast", "Results come back sooner without the second look. Check cutouts yourself.")
+            }
+        }
+    }
+
+    private func option(_ id: String, _ title: String, _ detail: String) -> some View {
+        let selected = (store.settings?.checks ?? "thorough") == id
+        return Button { Task { await store.setChecks(id) } } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle").font(.title3)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.body.weight(.semibold))
+                    Text(detail).font(.subheadline).foregroundStyle(Theme.muted).multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Theme.ink)
+            .padding(18)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.ink.opacity(selected ? 0.6 : 0), lineWidth: 1.5))
+        }
+        .buttonStyle(PressableStyle())
+        .disabled(store.settings == nil)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private struct PhotoPage: View {
+    @Environment(Store.self) private var store
+    @State private var choosing = false
+    @State private var taking = false
+    @State private var pick: PhotosPickerItem?
+
+    var body: some View {
+        Page(title: "Photo of you") {
+            AsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)") : nil) { phase in
+                if case .success(let image) = phase { image.resizable().scaledToFill() } else {
+                    Image(systemName: "person.crop.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.muted)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 380)
+            .background(Theme.card)
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .accessibilityLabel("Your photo for try-ons")
+
+            Text("Try-ons dress this person in your planned outfits. A full-body photo facing the camera, in good light, works best.")
+                .font(.subheadline).foregroundStyle(Theme.muted)
+
+            HStack(spacing: 10) {
+                if CameraPicker.isAvailable {
+                    Button("Take photo") { taking = true }.buttonStyle(PrimaryButtonStyle())
+                }
+                Button("Choose photo") { choosing = true }.buttonStyle(QuietButtonStyle())
+            }
+        }
+        .photosPicker(isPresented: $choosing, selection: $pick, matching: .images)
+        .onChange(of: pick) { _, item in
+            guard let item else { return }
+            pick = nil
             Task {
-                guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
+                guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
                 await store.uploadModelReference(jpeg)
             }
         }
-        .fullScreenCover(isPresented: $takingPhoto) {
+        .fullScreenCover(isPresented: $taking) {
             CameraPicker { photo in
                 guard let jpeg = uploadJPEG(photo) else { return }
                 Task { await store.uploadModelReference(jpeg) }
@@ -131,52 +235,45 @@ struct SettingsView: View {
             .ignoresSafeArea()
         }
     }
+}
 
-    @ViewBuilder private var connection: some View {
-        if store.config != nil {
-            Label("Connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Not connected", systemImage: "xmark.circle.fill").foregroundStyle(.red)
-                if let reason = store.connectionError {
-                    Text(reason).font(.footnote).foregroundStyle(Theme.muted)
+private struct LaundryPage: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        Page(title: "Wears before washing") {
+            Text("How many times each type is worn before it goes in the wash. Outfits can repeat a piece on nearby days up to this many times. A piece can still set its own.")
+                .font(.subheadline).foregroundStyle(Theme.muted)
+            Panel {
+                ForEach(Parts.order, id: \.self) { part in
+                    PanelRow(title: Parts.label(part)) {
+                        CountStepper(value: Binding(get: { store.defaultWears(part) }, set: { value in Task { await store.setDefaultWears(part, value) } }))
+                    }
                 }
             }
-            Button("Try again") { Task { await store.refresh() } }
-        }
-    }
-
-    private var reference: some View {
-        AsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)") : nil) { phase in
-            if case .success(let image) = phase { image.resizable().scaledToFill() } else {
-                Image(systemName: "person.crop.rectangle").font(.title2).foregroundStyle(Theme.muted)
+            .disabled(store.settings?.wears == nil)
+            if store.settings?.wears == nil {
+                Text("Update the server on your Mac to change these.").font(.footnote).foregroundStyle(Theme.muted)
             }
         }
-        .frame(width: 48, height: 64)
-        .background(Theme.ink.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .accessibilityHidden(true)
     }
 }
 
 /// What changed in each server version, newest first.
-private struct ChangelogView: View {
+private struct ChangelogPage: View {
     let releases: [ServerVersion.Release]
 
     var body: some View {
-        List(releases, id: \.version) { release in
-            Section {
-                ForEach(release.notes, id: \.self) { Text($0).font(.subheadline) }
-            } header: {
-                HStack {
-                    Text(release.version)
-                    Spacer()
-                    if let date = release.date { Text(date) }
+        Page(title: "Changelog") {
+            ForEach(releases, id: \.version) { release in
+                Panel(title: [release.version, release.date].compactMap(\.self).joined(separator: " · ")) {
+                    ForEach(release.notes, id: \.self) { note in
+                        Text(note).font(.subheadline).foregroundStyle(Theme.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 18).padding(.vertical, 14)
+                    }
                 }
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(Theme.canvas.ignoresSafeArea())
-        .navigationTitle("Changelog")
     }
 }

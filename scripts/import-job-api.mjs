@@ -15,7 +15,7 @@ const DECISIONS = new Set(["approve", "reject"]);
 const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 // Bumped when the app needs endpoints or fields an older server lacks; the app compares it with its minimum.
-export const API_VERSION = 3;
+export const API_VERSION = 4;
 const SETTINGS = { checks: new Set(["thorough", "fast"]) };
 // wears: how many times each category is worn before washing, unless a piece sets its own.
 const DEFAULT_SETTINGS = { checks: "thorough", wears: DEFAULT_WEARS };
