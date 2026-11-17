@@ -2,6 +2,11 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.3.0 — 2026-11-17
+- Wears before washing has a default per type of clothing, set in Settings
+- Back photos are kept, and a back cutout can be redone from its photo without a new one
+- Back cutouts pressed and straightened
+
 ## 1.2.0 — 2026-11-17
 - Server versions, an API level the app checks, and this changelog
 - AI checks setting: Thorough reviews and retries every result, Fast skips the reviewer

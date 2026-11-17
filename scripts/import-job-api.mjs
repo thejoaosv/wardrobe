@@ -5,7 +5,7 @@ import sharp from "sharp";
 import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback } from "./ai-review.mjs";
 import { createAIProvider } from "./openai-provider.mjs";
 import { parseChangelog } from "./changelog.mjs";
-import { DATE, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { DATE, DEFAULT_WEARS, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
 const ASSET_ROOT = "/api/import/assets";
@@ -17,7 +17,8 @@ const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 // Bumped when the app needs endpoints or fields an older server lacks; the app compares it with its minimum.
 export const API_VERSION = 3;
 const SETTINGS = { checks: new Set(["thorough", "fast"]) };
-const DEFAULT_SETTINGS = { checks: "thorough" };
+// wears: how many times each category is worn before washing, unless a piece sets its own.
+const DEFAULT_SETTINGS = { checks: "thorough", wears: DEFAULT_WEARS };
 // Generations tried before the best one goes to the user with the reviewer's remaining notes.
 const CUTOUT_ATTEMPTS = 3;
 const TRY_ON_ATTEMPTS = 2;
@@ -418,8 +419,10 @@ export function wardrobeImportApi(options = {}) {
   let settingsFile;
 
   async function loadSettings() {
-    try { return { ...DEFAULT_SETTINGS, ...JSON.parse(await readFile(settingsFile, "utf8")) }; }
-    catch (error) { if (error.code === "ENOENT") return { ...DEFAULT_SETTINGS }; throw error; }
+    try {
+      const saved = JSON.parse(await readFile(settingsFile, "utf8"));
+      return { ...DEFAULT_SETTINGS, ...saved, wears: { ...DEFAULT_WEARS, ...saved.wears } };
+    } catch (error) { if (error.code === "ENOENT") return structuredClone(DEFAULT_SETTINGS); throw error; }
   }
 
   // Unknown keys and values are ignored, so an older app can't write anything the server doesn't understand.
@@ -427,10 +430,16 @@ export function wardrobeImportApi(options = {}) {
     return serial(async () => {
       const next = await loadSettings();
       for (const [key, allowed] of Object.entries(SETTINGS)) if (allowed.has(input?.[key])) next[key] = input[key];
+      for (const [part, wears] of Object.entries(input?.wears && typeof input.wears === "object" ? input.wears : {})) {
+        if (PARTS.has(part) && Number.isInteger(wears) && wears >= 1 && wears <= 10) next.wears[part] = wears;
+      }
       await atomicJson(settingsFile, next);
       return next;
     });
   }
+
+  // Pieces without their own wear count get the user's default for their category, so the planner sees one number.
+  const withWears = (items, settings) => items.map((item) => (Number.isInteger(item.wears) ? item : { ...item, wears: settings.wears[item.part] ?? 1 }));
 
   // The Fast setting skips the AI reviewer and its retries for image work and detection.
   const reviewed = async (options) => ((await loadSettings()).checks === "fast" ? untilApproved({ ...options, attempts: 1, check: () => [] }) : untilApproved(options));
@@ -498,7 +507,7 @@ export function wardrobeImportApi(options = {}) {
   }
 
   async function planList(plans) {
-    const items = await loadImported();
+    const items = withWears(await loadImported(), await loadSettings());
     return Object.values(plans).sort((a, b) => a.date.localeCompare(b.date)).map((plan) => ({ ...plan, repeats: repeatedGarments(plans, plan.date, items) }));
   }
 
@@ -511,7 +520,7 @@ export function wardrobeImportApi(options = {}) {
       replace: typeof day?.replace === "string" ? day.replace : undefined,
     }));
     if (days.some((day) => !day.date) || new Set(days.map((day) => day.date)).size !== days.length) throw Object.assign(new Error("Each day needs a unique YYYY-MM-DD date"), { status: 400 });
-    const library = await loadImported();
+    const library = withWears(await loadImported(), await loadSettings());
     const items = library.filter((item) => !item.unavailable);
     if (!items.some((item) => item.part === "upperbody") || !items.some((item) => item.part === "lowerbody")) {
       throw Object.assign(new Error("Plan needs at least one available top and one available bottom"), { status: 409 });
@@ -592,10 +601,15 @@ export function wardrobeImportApi(options = {}) {
     return record;
   }
 
-  // Makes a piece's cutout again in the background like any other generation: the back from a photo of it, or the front
-  // from a new photo, else the photo kept at import, else the current cutout (older pieces kept no photo).
+  // Makes a side's cutout again in the background like any other generation: from a new photo, else the photo kept
+  // for that side, else its current cutout (older pieces kept no photo). A new photo is kept for the next redo.
   async function startCutout(id, side, input) {
-    const upload = side === "back" || input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null;
+    const upload = input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null;
+    const sourceKey = side === "back" ? "backSourceImage" : "sourceImage";
+    const imageKey = side === "back" ? "backImage" : "image";
+    if (!upload && side === "back" && !(await loadImported()).find((record) => record.id === id)?.backImage) {
+      throw Object.assign(new Error("Add a photo of the back first"), { status: 400 });
+    }
     const direction = typeof input.direction === "string" ? input.direction.trim().slice(0, 600) : "";
     const lock = `${side}:${id}`;
     if (running.has(lock)) throw Object.assign(new Error(side === "back" ? "The back is already being cut out" : "The cutout is already being redone"), { status: 409 });
@@ -612,9 +626,10 @@ export function wardrobeImportApi(options = {}) {
         const chromaKey = chooseChromaKey(record.color);
         const transparent = (await ai.status()).provider === "codex";
         const front = await normalizeImage(await readFile(libraryFile(record.image)));
-        const kept = side === "front" && !upload && record.sourceImage ? await readFile(libraryFile(record.sourceImage)).then(normalizeImage).catch(() => null) : null;
-        const photo = upload || kept || front;
-        const fromCutout = photo === front;
+        const current = side === "front" ? front : record.backImage ? await readFile(libraryFile(record.backImage)).then(normalizeImage) : null;
+        const kept = !upload && record[sourceKey] ? await readFile(libraryFile(record[sourceKey])).then(normalizeImage).catch(() => null) : null;
+        const photo = upload || kept || current;
+        const fromCutout = photo === current;
         // The front's text describes the front only; the back photo speaks for itself.
         const metadata = side === "back" ? { ...record, name: `${record.name}, back view`, text: "" } : record;
         let prompt = buildGarmentPrompt(metadata, chromaKey, { transparent });
@@ -622,7 +637,7 @@ export function wardrobeImportApi(options = {}) {
         if (fromCutout) prompt += "\n\nImage 1 is this piece's current cutout. Recreate the same real garment as a cleaner cutout, and where its text or details contradict the description and text above, follow the description and text.";
         if (direction) prompt += `\nUser regeneration direction: ${direction}`;
         const images = side === "back"
-          ? [{ data: photo, role: "the user's photo of the back of the garment; reproduce this exact back" }, { data: front, role: "the existing front cutout of the same garment, for consistency only" }]
+          ? [{ data: photo, role: fromCutout ? "the current cutout of the back of the garment to recreate" : "the user's photo of the back of the garment; reproduce this exact back" }, { data: front, role: "the existing front cutout of the same garment, for consistency only" }]
           : [{ data: photo, role: fromCutout ? "the current cutout of the garment to recreate" : "the user's photo of the garment; reproduce this exact garment" }];
         const { result, problems } = await reviewed({
           attempts: CUTOUT_ATTEMPTS,
@@ -630,22 +645,25 @@ export function wardrobeImportApi(options = {}) {
           check: (cutout) => { say(key, "Checking the cutout…"); return reviewCutout(ai, { photo, cutout, metadata, side, referenceIsCutout: fromCutout }); },
           onRetry: retrying(key, CUTOUT_ATTEMPTS),
         });
-        const file = `${id}-${side === "back" ? "back" : "garment"}-${Date.now()}.png`;
+        const stamp = Date.now();
+        const file = `${id}-${side === "back" ? "back" : "garment"}-${stamp}.png`;
+        const sourceFile = upload ? `${id}-${side}-source-${stamp}.png` : null;
         await writeFile(path.join(libraryAssetDir, file), result);
-        const imageKey = side === "back" ? "backImage" : "image";
+        if (sourceFile) await writeFile(path.join(libraryAssetDir, sourceFile), upload);
         // removeBack clears the processing status; then this result is stale and is thrown away.
-        let previous = null;
+        let previous = [];
         let removed = false;
         const updated = await updateRecord(id, (record) => {
           if (record[side]?.status !== "processing") { removed = true; return; }
-          previous = record[imageKey];
+          previous = [record[imageKey], sourceFile && record[sourceKey]];
           record[imageKey] = `${LIBRARY_ASSET_ROOT}/${file}`;
+          if (sourceFile) record[sourceKey] = `${LIBRARY_ASSET_ROOT}/${sourceFile}`;
           if (side === "front") record.thumbnail = record.image;
           record[side] = { status: "ready", warnings: problems, updatedAt: new Date().toISOString() };
         });
         if (!updated) removed = true;
-        const stale = removed ? file : previous;
-        if (stale) await rm(libraryFile(stale), { force: true });
+        const stale = removed ? [file, sourceFile] : previous;
+        await Promise.all(stale.filter(Boolean).map((name) => rm(libraryFile(name), { force: true })));
       } catch (error) {
         await updateRecord(id, (record) => { if (record[side]?.status === "processing") record[side] = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
       } finally {
@@ -658,9 +676,9 @@ export function wardrobeImportApi(options = {}) {
 
   async function removeBack(id) {
     let previous = null;
-    const record = await updateRecord(id, (record) => { previous = record.backImage; record.backImage = null; record.back = null; });
+    const record = await updateRecord(id, (record) => { previous = [record.backImage, record.backSourceImage]; record.backImage = null; record.backSourceImage = null; record.back = null; });
     if (!record) throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
-    if (previous) await rm(path.join(libraryAssetDir, path.basename(previous)), { force: true });
+    await Promise.all(previous.filter(Boolean).map((image) => rm(libraryFile(image), { force: true })));
     return record;
   }
 
@@ -950,7 +968,7 @@ export function wardrobeImportApi(options = {}) {
         await Promise.all([
           rm(path.join(libraryAssetDir, `${id}-garment.png`), { force: true }),
           rm(path.join(libraryAssetDir, `${id}-modeled.png`), { force: true }),
-          ...[removed.image, removed.backImage, removed.sourceImage].filter(Boolean).map((image) => rm(libraryFile(image), { force: true })),
+          ...[removed.image, removed.backImage, removed.sourceImage, removed.backSourceImage].filter(Boolean).map((image) => rm(libraryFile(image), { force: true })),
         ]);
         return json(res, 200, { deleted: true, id });
       }
