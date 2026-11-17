@@ -134,7 +134,9 @@ Asset type: ecommerce catalog product cutout source
 
 Input images: Image 1 is the photo the user selected, cropped to this garment, either by itself or worn by a person. Image 2, when present, is the full selected photo for context on true color, texture and how the garment sits. Reconstruct exactly this real garment from them; do not design a new one.
 
-Primary request: Reconstruct ONLY the complete empty ${name} (${category}) as a clean, front-facing ecommerce catalog product photograph. If a wearer is present, remove them. Remove every other garment, object, and background element. Show the complete item naturally arranged and symmetrical, with no person, body, mannequin, or hanger visible.
+Primary request: Reconstruct ONLY the complete empty ${name} (${category}) as a clean, front-facing ecommerce catalog product photograph. If a wearer is present, remove them. Remove every other garment, object, and background element. Show the complete item with no person, body, mannequin, or hanger visible.
+
+Straighten: Lay the garment out straight and symmetrical, as if freshly steamed and neatly flat-laid. Smooth away wrinkles, creases and folds that come from how it was photographed, untwist it, and extend sleeves, legs, hoods, collars and hems naturally instead of bunched, folded over or tucked. Keep features that belong to the garment itself, such as pleats, ribbing, distressing, quilting or an intentionally crinkled fabric.
 
 Garment fidelity: Preserve the reference garment's exact primary color ${primary}${secondary}, material and texture, silhouette, neckline, sleeves, fastenings, pattern, and distinctive details (${details}).${description} Preserve any clearly legible existing graphic or logo exactly, but do not invent or reinterpret uncertain logos, text, pockets, seams, hardware, colors, or decoration.${lettering}
 
@@ -146,7 +148,7 @@ Background: ${transparent
 
 Lighting: Neutral diffuse product lighting contained on the garment only.
 
-Avoid: person, body, skin, hair, mannequin, hanger, props, other garments, retail tags, cast shadow, contact shadow, reflection, watermark, caption, border, background variation, or chroma spill.
+Avoid: person, body, skin, hair, mannequin, hanger, props, other garments, wrinkles, folded or twisted sleeves, retail tags, cast shadow, contact shadow, reflection, watermark, caption, border, background variation, or chroma spill.
 
 Critical: Use no ${chromaKey} anywhere in the garment. Produce exactly one complete garment with a crisp, separable outer silhouette.`;
 }
