@@ -9,6 +9,10 @@ struct ItemSheet: View {
     @State private var newTag = ""
     @State private var backPick: PhotosPickerItem?
     @State private var frontPick: PhotosPickerItem?
+    @State private var picking: Side?
+    @State private var shooting: Side?
+
+    enum Side: String, Identifiable { case front, back; var id: String { rawValue } }
     @State private var confirmingRemove = false
     private let original: Item
 
@@ -139,10 +143,7 @@ struct ItemSheet: View {
                                     }
                                 }
                                 .buttonStyle(QuietButtonStyle())
-                                PhotosPicker(selection: $frontPick, matching: .images) {
-                                    Label("From a new photo", systemImage: "photo")
-                                }
-                                .buttonStyle(QuietButtonStyle())
+                                photoMenu(.front, label: "From a new photo")
                             }
                             .disabled(frontStatus == "processing")
                         }
@@ -158,11 +159,8 @@ struct ItemSheet: View {
                                 ReviewerNote(warnings: warnings)
                             }
                             HStack(spacing: 10) {
-                                PhotosPicker(selection: $backPick, matching: .images) {
-                                    Label(live.backImage == nil ? "Add back photo" : "Replace back photo", systemImage: "camera")
-                                }
-                                .buttonStyle(QuietButtonStyle())
-                                .disabled(backStatus == "processing")
+                                photoMenu(.back, label: live.backImage == nil ? "Add back photo" : "Replace back photo")
+                                    .disabled(backStatus == "processing")
                                 if live.backImage != nil {
                                     Button("Remove back", systemImage: "trash") { Task { await store.removeBack(live) } }
                                         .labelStyle(.iconOnly)
@@ -211,13 +209,21 @@ struct ItemSheet: View {
         .presentationDragIndicator(.visible)
         // Saves on any dismissal (Done or swipe), only if something changed.
         .onDisappear { Task { await save() } }
+        .photosPicker(isPresented: Binding(get: { picking == .front }, set: { if !$0 { picking = nil } }), selection: $frontPick, matching: .images)
+        .photosPicker(isPresented: Binding(get: { picking == .back }, set: { if !$0 { picking = nil } }), selection: $backPick, matching: .images)
+        .fullScreenCover(item: $shooting) { side in
+            CameraPicker { photo in
+                guard let jpeg = uploadJPEG(photo) else { return }
+                Task { await use(jpeg, for: side) }
+            }
+            .ignoresSafeArea()
+        }
         .onChange(of: frontPick) { _, pick in
             guard let pick else { return }
             frontPick = nil
             Task {
                 guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
-                await save()
-                await store.redoCutout(live, jpeg: jpeg)
+                await use(jpeg, for: .front)
             }
         }
         .onChange(of: backPick) { _, pick in
@@ -225,7 +231,7 @@ struct ItemSheet: View {
             backPick = nil
             Task {
                 guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
-                await store.addBack(live, jpeg: jpeg)
+                await use(jpeg, for: .back)
             }
         }
         .task(id: "\(backStatus ?? "")\(frontStatus ?? "")") {
@@ -273,6 +279,29 @@ struct ItemSheet: View {
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .saturation(live.isAvailable ? 1 : 0)
         .animation(Theme.spring, value: live.isAvailable)
+    }
+
+    /// Take a photo or pick one from the library.
+    private func photoMenu(_ side: Side, label: String) -> some View {
+        Menu {
+            if CameraPicker.isAvailable {
+                Button("Take photo", systemImage: "camera") { shooting = side }
+            }
+            Button("Choose from library", systemImage: "photo.on.rectangle") { picking = side }
+        } label: {
+            Label(label, systemImage: "camera")
+        }
+        .buttonStyle(QuietButtonStyle())
+    }
+
+    private func use(_ jpeg: Data, for side: Side) async {
+        switch side {
+        case .front:
+            await save()
+            await store.redoCutout(live, jpeg: jpeg)
+        case .back:
+            await store.addBack(live, jpeg: jpeg)
+        }
     }
 
     private func working(_ title: String) -> some View {

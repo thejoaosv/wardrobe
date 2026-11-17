@@ -212,6 +212,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Wardrobe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Valet;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Take photos of clothes to add them to your closet.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Valet connects to the Wardrobe server running on your Mac.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -230,6 +231,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Wardrobe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Valet;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Take photos of clothes to add them to your closet.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Valet connects to the Wardrobe server running on your Mac.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

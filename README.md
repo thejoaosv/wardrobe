@@ -35,7 +35,7 @@ Open [localhost:5173](http://localhost:5173).
 
 - **Plan**: generate outfits for 1–14 days, with one style for all days or a style per day, and the weather. Every outfit has a base top (t-shirt, shirt); cold days add a hoodie or sweater over it and a jacket on top. Swipe a day to restyle or delete it.
 - **Closet**: tap a piece to mark it as in the laundry (unavailable) or available again. "Laundry done" returns everything at once.
-- **Import**: pick photos from your camera roll and review each crop and cutout.
+- **Import**: take a photo or pick some from your camera roll, then review each crop and cutout. A piece can redo its cutout later from its photo or a new one.
 - **Try on**: ask for a photo of yourself wearing a planned outfit (needs `data/model-reference.png`).
 - **Notifications**: you're told when pieces are ready to review or a try-on is done, even with the app closed.
 

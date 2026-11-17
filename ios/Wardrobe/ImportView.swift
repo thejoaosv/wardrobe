@@ -4,6 +4,7 @@ import SwiftUI
 struct ImportForm: View {
     @Environment(Store.self) private var store
     @State private var selection: [PhotosPickerItem] = []
+    @State private var takingPhoto = false
     private var busy: Bool { !store.detecting.isEmpty || store.jobs.contains { ["queued", "processing", "pending"].contains($0.current.stage.status) } }
 
     var body: some View {
@@ -29,13 +30,33 @@ struct ImportForm: View {
             .animation(Theme.spring, value: store.detecting)
         }
         .safeAreaInset(edge: .bottom) {
-            PhotosPicker(selection: $selection, maxSelectionCount: 5, matching: .images) {
-                Text("Choose photos")
+            HStack(spacing: 10) {
+                PhotosPicker(selection: $selection, maxSelectionCount: 5, matching: .images) {
+                    Text("Choose photos")
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                if CameraPicker.isAvailable {
+                    Button { takingPhoto = true } label: {
+                        Image(systemName: "camera").font(.body.weight(.semibold))
+                            .frame(width: 54, height: 54)
+                            .overlay(Circle().strokeBorder(Theme.ink.opacity(0.18), lineWidth: 1))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(PressableStyle())
+                    .foregroundStyle(Theme.ink)
+                    .accessibilityLabel("Take photo")
+                }
             }
-            .buttonStyle(PrimaryButtonStyle())
             .disabled(store.config?.ready != true)
             .padding(.horizontal, 24)
             .padding(.bottom, 8)
+        }
+        .fullScreenCover(isPresented: $takingPhoto) {
+            CameraPicker { photo in
+                guard let jpeg = uploadJPEG(photo) else { return }
+                Task { await store.importPhoto(jpeg) }
+            }
+            .ignoresSafeArea()
         }
         .background(Theme.canvas.ignoresSafeArea())
         .task(id: busy) {

@@ -44,6 +44,7 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Valet connects to the Wardrobe server running on your Mac.
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: Choose photos of clothes to import.
+        INFOPLIST_KEY_NSCameraUsageDescription: Take photos of clothes to add them to your closet.
     info:
       path: Wardrobe/Info.plist
       properties:

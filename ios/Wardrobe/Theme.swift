@@ -135,8 +135,42 @@ nonisolated extension Color {
 
 /// Photos are downscaled before upload; the server never needs more than 2048px.
 func uploadJPEG(_ data: Data) -> Data? {
-    guard let image = UIImage(data: data) else { return nil }
+    UIImage(data: data).flatMap(uploadJPEG)
+}
+
+func uploadJPEG(_ image: UIImage) -> Data? {
     let scale = min(1, 2048 / max(image.size.width, image.size.height))
     let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
     return UIGraphicsImageRenderer(size: size).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }.jpegData(compressionQuality: 0.85)
+}
+
+/// The system camera, for photographing clothes without leaving the app.
+struct CameraPicker: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+    let onCapture: (UIImage) -> Void
+
+    static var isAvailable: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraPicker
+        init(parent: CameraPicker) { self.parent = parent }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage { parent.onCapture(image) }
+            parent.dismiss()
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
+    }
 }
