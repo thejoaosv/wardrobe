@@ -22,6 +22,14 @@ struct WardrobeApp: App {
                 .tint(Theme.ink)
                 .environment(store)
                 .task { await store.refresh() }
+                .task(id: store.isWorking) {
+                    // Status lines change every few seconds while the AI checks and retries its work.
+                    while store.isWorking && !Task.isCancelled {
+                        await store.loadProgress()
+                        try? await Task.sleep(for: .seconds(2))
+                    }
+                    store.progress = [:]
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background, store.hasPendingWork, let base = store.baseURL {
                         Notifier.shared.arm(base: base)

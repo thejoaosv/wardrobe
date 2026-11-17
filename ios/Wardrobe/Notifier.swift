@@ -58,7 +58,7 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
     }
 
     private struct Result: Decodable {
-        struct TryOn: Decodable { let name: String; let status: String }
+        struct TryOn: Decodable { let name: String; let status: String; var side: String? }
         let busy: Bool
         let reviews: Int
         let tryOns: [TryOn]
@@ -73,7 +73,10 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
             else { Self.post("Try-on didn't work", "Open \(tryOn.name) to try again.") }
         }
         for back in result.backs ?? [] {
-            if back.status == "ready" { Self.post("Back cutout ready", "\(back.name) now has its back photo.") }
+            if back.side == "front" {
+                if back.status == "ready" { Self.post("New cutout ready", "\(back.name) has a fresh cutout.") }
+                else { Self.post("Cutout didn't work", "Open \(back.name) to try again.") }
+            } else if back.status == "ready" { Self.post("Back cutout ready", "\(back.name) now has its back photo.") }
             else { Self.post("Back cutout didn't work", "Open \(back.name) to try again.") }
         }
         if result.reviews > 0 {

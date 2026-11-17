@@ -4,9 +4,7 @@ import SwiftUI
 struct ImportForm: View {
     @Environment(Store.self) private var store
     @State private var selection: [PhotosPickerItem] = []
-    @State private var analyzing = 0
-
-    private var busy: Bool { analyzing > 0 || store.jobs.contains { ["queued", "processing", "pending"].contains($0.current.stage.status) } }
+    private var busy: Bool { !store.detecting.isEmpty || store.jobs.contains { ["queued", "processing", "pending"].contains($0.current.stage.status) } }
 
     var body: some View {
         ScrollView {
@@ -20,15 +18,15 @@ struct ImportForm: View {
                     }
                 }
                 .font(.subheadline).foregroundStyle(Theme.muted)
-                if analyzing > 0 {
-                    ReviewCard(title: "Finding clothes", subtitle: "Looking at \(analyzing) photo\(analyzing == 1 ? "" : "s")", imageURL: nil) { EmptyView() }
+                ForEach(store.detecting, id: \.self) { id in
+                    ReviewCard(title: "New photo", subtitle: "Finding clothes", status: store.progress["detect:\(id)"], imageURL: nil) { EmptyView() }
                         .transition(.scale(scale: 0.96).combined(with: .opacity))
                 }
                 ForEach(store.jobs) { JobCard(job: $0).transition(.scale(scale: 0.96).combined(with: .opacity)) }
             }
             .padding(24)
             .animation(Theme.spring, value: store.jobs.map(\.current.stage.status))
-            .animation(Theme.spring, value: analyzing)
+            .animation(Theme.spring, value: store.detecting)
         }
         .safeAreaInset(edge: .bottom) {
             PhotosPicker(selection: $selection, maxSelectionCount: 5, matching: .images) {
@@ -52,9 +50,7 @@ struct ImportForm: View {
             guard !picked.isEmpty else { return }
             selection = []
             for item in picked {
-                analyzing += 1
                 Task {
-                    defer { analyzing -= 1 }
                     guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
                     await store.importPhoto(jpeg)
                 }
@@ -71,9 +67,12 @@ private struct JobCard: View {
         let (name, stage) = job.current
         let step = name == "crop" ? "Is this the right piece?" : "Cutout"
         let waiting = ["queued", "processing", "pending"].contains(stage.status)
-        ReviewCard(title: job.metadata.name, subtitle: waiting ? "Cutting out…" : step, imageURL: waiting ? nil : store.url(stage.assetUrl)) {
+        ReviewCard(title: job.metadata.name, subtitle: waiting ? "Cutting out" : step, status: waiting ? store.progress["job:\(job.id)"] : nil, imageURL: waiting ? nil : store.url(stage.assetUrl)) {
             switch stage.status {
             case "review":
+                if let warnings = stage.warnings, !warnings.isEmpty {
+                    ReviewerNote(warnings: warnings)
+                }
                 HStack(spacing: 10) {
                     Button("Keep") { Task { await store.review(job, "approve") } }.buttonStyle(PrimaryButtonStyle())
                     if name != "crop" {
@@ -95,9 +94,27 @@ private struct JobCard: View {
     }
 }
 
+/// What the AI reviewer still saw wrong after its retries, so the user knows what to check before keeping it.
+struct ReviewerNote: View {
+    let warnings: [String]
+
+    var body: some View {
+        Label {
+            Text("Still not quite right: \(warnings.joined(separator: " · "))")
+        } icon: {
+            Image(systemName: "exclamationmark.triangle")
+        }
+        .font(.footnote)
+        .foregroundStyle(Theme.muted)
+        .lineLimit(4)
+    }
+}
+
 private struct ReviewCard<Actions: View>: View {
     let title: String
     let subtitle: String
+    /// The AI's live status, e.g. "Retrying (2/3): …".
+    var status: String? = nil
     let imageURL: URL?
     @ViewBuilder let actions: Actions
 
@@ -121,7 +138,13 @@ private struct ReviewCard<Actions: View>: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(subtitle).eyebrow()
                 Text(title).font(.display(22))
+                if let status {
+                    Text(status).font(.footnote).foregroundStyle(Theme.muted).lineLimit(3)
+                        .contentTransition(.opacity)
+                        .padding(.top, 4)
+                }
             }
+            .animation(.easeInOut(duration: 0.25), value: status)
             actions
         }
         .padding(18)

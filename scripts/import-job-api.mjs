@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
+import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback } from "./ai-review.mjs";
 import { createAIProvider } from "./openai-provider.mjs";
 import { DATE, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
@@ -12,6 +13,11 @@ const STAGES = new Set(["crop", "garment", "modeled"]);
 const DECISIONS = new Set(["approve", "reject"]);
 const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+// Generations tried before the best one goes to the user with the reviewer's remaining notes.
+const CUTOUT_ATTEMPTS = 3;
+const TRY_ON_ATTEMPTS = 2;
+const DETECT_ATTEMPTS = 2;
+const PLAN_ATTEMPTS = 3;
 
 function json(res, status, value) {
   res.statusCode = status;
@@ -287,6 +293,11 @@ async function verifyNoChromaSpill(bytes, key) {
   return { contaminatedPixels, maxSpill };
 }
 
+// Turns a generated image into a framed transparent cutout, keying out the chroma backdrop when it has no alpha.
+async function cleanCutout(bytes, chromaKey) {
+  return await hasTransparentBackground(bytes) ? frameTransparentGarment(bytes) : removeChromaBackground(bytes, chromaKey);
+}
+
 // True when an image already has a real transparent backdrop (at least 5% fully clear pixels, all four corners clear).
 export async function hasTransparentBackground(bytes) {
   const { data, info } = await sharp(bytes).ensureAlpha().extractChannel(3).raw().toBuffer({ resolveWithObject: true });
@@ -352,15 +363,36 @@ function stageState() {
   return { status: "pending", decision: null, attempts: 0, assetUrl: null, failedAssetUrl: null, cleanupPreviewUrl: null, cleanupTolerance: 46, cleanupDiagnostics: null, error: null, prompt: null, updatedAt: null };
 }
 
-const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Name each item specifically enough to tell it apart from similar pieces: color, distinguishing graphic or brand, and type, e.g. "Grey ROTATION LX varsity hoodie" or "Black Dickies chest-logo tee", not "Graphic hoodie". Give a primary hex color, an optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags. description is one or two sentences a stylist can plan with: fabric and weight, fit, warmth, formality, and notable design details. text transcribes, letter for letter, every word printed, embroidered or patched on the item with its placement and relative size, e.g. 'front: large arched "ROTATION", small "LX" centered below'; use an empty string when there is no legible text.`;
+const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. Only include items the photo is clearly meant to show: what the main person wears, or garments laid out or held as the subject. Leave out other people's clothes, things on hangers, chairs or floors in the background, items mostly out of frame, and layers hidden under others. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Name each item specifically enough to tell it apart from similar pieces: color, distinguishing graphic or brand, and type, e.g. "Grey ROTATION LX varsity hoodie" or "Black Dickies chest-logo tee", not "Graphic hoodie". Give a primary hex color, an optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags. description is one or two sentences a stylist can plan with: fabric and weight, fit, warmth, formality, and notable design details. text transcribes, letter for letter, every word printed, embroidered or patched on the item with its placement and relative size, e.g. 'front: large arched "ROTATION", small "LX" centered below'; use an empty string when there is no legible text.`;
 
 const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, description: { type: "string" }, text: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "description", "text", "tags", "boundingBox"] } } }, required: ["items"] };
 
-async function analyzeClothes(ai, image) {
-  const parsed = await ai.json({ prompt: ANALYZE_PROMPT, images: [image], schema: ANALYZE_SCHEMA, kind: "vision" })
-    .catch((error) => { throw Object.assign(error, { status: 502 }); });
+async function analyzeClothes(ai, image, feedback = []) {
+  const parsed = await ai.json({ prompt: withFeedback(ANALYZE_PROMPT, feedback), images: [image], schema: ANALYZE_SCHEMA, kind: "vision" });
   if (!Array.isArray(parsed.items)) throw new Error("Clothing analysis returned an invalid clothing list");
   return parsed.items;
+}
+
+// Detects pieces, has a reviewer drop the ones the user isn't adding, and runs detection again when crops or labels are off.
+async function detectClothes(ai, photo, report) {
+  const { result } = await untilApproved({
+    attempts: DETECT_ATTEMPTS,
+    make: async (feedback) => {
+      if (!feedback.length) report("Finding clothes…");
+      const items = (await analyzeClothes(ai, photo, feedback)).map(normalizeMetadata);
+      return Promise.all(items.map(async (metadata) => ({ metadata, crop: await cropDetectedItem(photo, metadata.boundingBox) })));
+    },
+    check: async (found) => {
+      if (!found.length) return [];
+      report(found.length === 1 ? "Checking the piece…" : `Checking ${found.length} pieces…`);
+      const { keep, problems } = await reviewDetection(ai, { photo, found });
+      // Dropped pieces leave the result in place, so a final attempt with notes still returns only kept ones.
+      for (let index = found.length - 1; index >= 0; index -= 1) if (!keep[index]) found.splice(index, 1);
+      return problems;
+    },
+    onRetry: (problems, attempt) => report(`Taking another look (${attempt}/${DETECT_ATTEMPTS}): ${problems[0]}`),
+  }).catch((error) => { throw Object.assign(error, { status: 502 }); });
+  return result;
 }
 
 export function wardrobeImportApi(options = {}) {
@@ -371,6 +403,11 @@ export function wardrobeImportApi(options = {}) {
   let plansFile;
   let outfitDir;
   const running = new Map();
+  // Live status lines for running AI work ("Checking the cutout…"), keyed by what they belong to; the app polls them.
+  const progress = new Map();
+  const say = (key, message) => { if (key) (message ? progress.set(key, message) : progress.delete(key)); };
+  const retrying = (key, total) => (problems, attempt) => say(key, `Retrying (${attempt}/${total}): ${problems[0]}`);
+  const libraryFile = (url) => path.join(libraryAssetDir, path.basename(url));
   let writeQueue = Promise.resolve();
   // Serializes read-modify-write cycles on library.json and plans.json.
   const serial = (task) => (writeQueue = writeQueue.then(task, task));
@@ -450,17 +487,24 @@ export function wardrobeImportApi(options = {}) {
       if (!items.some((item) => item.part === part && item.id !== day.replace)) throw Object.assign(new Error(`No other ${PART_NAMES[part] || "piece"} to swap in`), { status: 409 });
     }
     const prompt = buildPlanPrompt({ items, days, history: historyFor(plans, days.map((day) => day.date)) });
-    // AI and validation failures are upstream problems the app should be able to show, not opaque 500s.
-    const stylist = (text) => ai.json({ prompt: text, schema: planSchema }).then((result) => validatePlan(result, { items, days }))
-      .catch((error) => { throw Object.assign(error, { status: 502 }); });
-    let planned = await stylist(prompt);
-    const issues = [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items)];
-    if (issues.length) {
-      const retry = `${prompt}\n\nA previous attempt broke these rules; avoid them: ${issues.join("; ")}.`;
-      planned = await stylist(retry);
-      // Repeats are soft rules, but a swap that changed more than the one piece would overwrite the user's outfit.
-      if (swapIssues(days, planned, library).length) throw Object.assign(new Error("The stylist couldn't swap just that piece. Try again."), { status: 502 });
+    const report = (message) => days.forEach((day) => say(`plan:${day.date}`, message));
+    let planned;
+    try {
+      ({ result: planned } = await untilApproved({
+        attempts: PLAN_ATTEMPTS,
+        make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\nA previous attempt broke these rules; avoid them: ${feedback.join("; ")}.` : prompt, schema: planSchema })
+          .then((result) => validatePlan(result, { items, days })),
+        check: (planned) => [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items)],
+        onRetry: (problems, attempt) => report(`Restyling to fix ${problems.length === 1 ? "a clash" : `${problems.length} clashes`} (${attempt}/${PLAN_ATTEMPTS})…`),
+      }));
+    } catch (error) {
+      // AI and validation failures are upstream problems the app should be able to show, not opaque 500s.
+      throw Object.assign(error, { status: 502 });
+    } finally {
+      report(null);
     }
+    // Repeats are soft rules, but a swap that changed more than the one piece would overwrite the user's outfit.
+    if (swapIssues(days, planned, library).length) throw Object.assign(new Error("The stylist couldn't swap just that piece. Try again."), { status: 502 });
     return serial(async () => {
       // Pieces may have been removed or put in the wash while the stylist ran.
       const available = (await loadImported()).filter((item) => !item.unavailable);
@@ -507,45 +551,64 @@ export function wardrobeImportApi(options = {}) {
     return record;
   }
 
-  // Cuts out the back of a piece from the user's photo, in the background like any other generation.
-  async function startBack(id, input) {
-    const photo = await normalizeImage(decodeImage(input).data);
-    const lock = `back:${id}`;
-    if (running.has(lock)) throw Object.assign(new Error("The back is already being cut out"), { status: 409 });
+  // Makes a piece's cutout again in the background like any other generation: the back from a photo of it, or the front
+  // from a new photo, else the photo kept at import, else the current cutout (older pieces kept no photo).
+  async function startCutout(id, side, input) {
+    const upload = side === "back" || input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null;
+    const direction = typeof input.direction === "string" ? input.direction.trim().slice(0, 600) : "";
+    const lock = `${side}:${id}`;
+    if (running.has(lock)) throw Object.assign(new Error(side === "back" ? "The back is already being cut out" : "The cutout is already being redone"), { status: 409 });
     // Reserved before any await so a second request can't start a duplicate generation.
     running.set(lock, null);
-    const record = await updateRecord(id, (record) => { record.back = { status: "processing" }; }).catch((error) => { running.delete(lock); throw error; });
+    const record = await updateRecord(id, (record) => { record[side] = { status: "processing" }; }).catch((error) => { running.delete(lock); throw error; });
     if (!record) {
       running.delete(lock);
       throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
     }
+    const key = `cutout:${id}`;
     const task = (async () => {
       try {
         const chromaKey = chooseChromaKey(record.color);
         const transparent = (await ai.status()).provider === "codex";
-        const prompt = `${buildGarmentPrompt({ ...record, name: `${record.name}, back view` }, chromaKey, { transparent })}
-
-Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as seen from behind, exactly as in Image 1. Image 2 is the existing front cutout of the same garment: keep color, material and proportions consistent with it, but do not copy front-only details such as buttons, plackets or chest graphics onto the back.`;
-        const front = await readFile(path.join(libraryAssetDir, path.basename(record.image)));
-        let bytes = await ai.editImage({ size: "1024x1024", quality: setting("OPENAI_IMAGE_QUALITY", "high"), transparent, prompt, images: [
-          { data: photo, role: "the user's photo of the back of the garment; reproduce this exact back" },
-          { data: await normalizeImage(front), role: "the existing front cutout of the same garment, for consistency only" },
-        ] });
-        bytes = await hasTransparentBackground(bytes) ? await frameTransparentGarment(bytes) : await removeChromaBackground(bytes, chromaKey);
-        const file = `${id}-back-${Date.now()}.png`;
-        await writeFile(path.join(libraryAssetDir, file), bytes);
+        const front = await normalizeImage(await readFile(libraryFile(record.image)));
+        const kept = side === "front" && !upload && record.sourceImage ? await readFile(libraryFile(record.sourceImage)).then(normalizeImage).catch(() => null) : null;
+        const photo = upload || kept || front;
+        const fromCutout = photo === front;
+        // The front's text describes the front only; the back photo speaks for itself.
+        const metadata = side === "back" ? { ...record, name: `${record.name}, back view`, text: "" } : record;
+        let prompt = buildGarmentPrompt(metadata, chromaKey, { transparent });
+        if (side === "back") prompt += "\n\nBack view: Image 1 shows the BACK of this garment. Reconstruct the garment as seen from behind, exactly as in Image 1. Image 2 is the existing front cutout of the same garment: keep color, material and proportions consistent with it, but do not copy front-only details such as buttons, plackets or chest graphics onto the back.";
+        if (fromCutout) prompt += "\n\nImage 1 is this piece's current cutout. Recreate the same real garment as a cleaner cutout, and where its text or details contradict the description and text above, follow the description and text.";
+        if (direction) prompt += `\nUser regeneration direction: ${direction}`;
+        const images = side === "back"
+          ? [{ data: photo, role: "the user's photo of the back of the garment; reproduce this exact back" }, { data: front, role: "the existing front cutout of the same garment, for consistency only" }]
+          : [{ data: photo, role: fromCutout ? "the current cutout of the garment to recreate" : "the user's photo of the garment; reproduce this exact garment" }];
+        const { result, problems } = await untilApproved({
+          attempts: CUTOUT_ATTEMPTS,
+          make: async (feedback) => cleanCutout(await ai.editImage({ size: "1024x1024", quality: setting("OPENAI_IMAGE_QUALITY", "high"), transparent, prompt: withFeedback(prompt, feedback), images }), chromaKey),
+          check: (cutout) => { say(key, "Checking the cutout…"); return reviewCutout(ai, { photo, cutout, metadata, side, referenceIsCutout: fromCutout }); },
+          onRetry: retrying(key, CUTOUT_ATTEMPTS),
+        });
+        const file = `${id}-${side === "back" ? "back" : "garment"}-${Date.now()}.png`;
+        await writeFile(path.join(libraryAssetDir, file), result);
+        const imageKey = side === "back" ? "backImage" : "image";
         // removeBack clears the processing status; then this result is stale and is thrown away.
         let previous = null;
         let removed = false;
         const updated = await updateRecord(id, (record) => {
-          if (record.back?.status !== "processing") { removed = true; return; }
-          previous = record.backImage; record.backImage = `${LIBRARY_ASSET_ROOT}/${file}`; record.back = { status: "ready", updatedAt: new Date().toISOString() };
+          if (record[side]?.status !== "processing") { removed = true; return; }
+          previous = record[imageKey];
+          record[imageKey] = `${LIBRARY_ASSET_ROOT}/${file}`;
+          if (side === "front") record.thumbnail = record.image;
+          record[side] = { status: "ready", warnings: problems, updatedAt: new Date().toISOString() };
         });
         if (!updated) removed = true;
         const stale = removed ? file : previous;
-        if (stale) await rm(path.join(libraryAssetDir, path.basename(stale)), { force: true });
+        if (stale) await rm(libraryFile(stale), { force: true });
       } catch (error) {
-        await updateRecord(id, (record) => { if (record.back?.status === "processing") record.back = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
+        await updateRecord(id, (record) => { if (record[side]?.status === "processing") record[side] = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
+      } finally {
+        say(key, null);
       }
     })().finally(() => running.delete(lock));
     running.set(lock, task);
@@ -598,19 +661,29 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       running.set(lock, null);
       const key = plan.garmentIds.join("+");
       await saveTryOn(date, key, { status: "processing" }).catch((error) => { running.delete(lock); throw error; });
+      const status = `tryon:${date}`;
       const task = (async () => {
         try {
           const images = [{ data: reference, role: "identity reference: the exact person to dress" }];
           for (const { item, side, image } of tryOnReferences(garments)) {
-            images.push({ data: await readFile(path.join(libraryAssetDir, path.basename(image))), role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name}, ${side} view (transparent cutout)` });
+            images.push({ data: await readFile(libraryFile(image)), role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name}, ${side} view (transparent cutout)` });
           }
-          const bytes = await ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) }))), prompt: buildTryOnPrompt(plan, garments) });
+          const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
+          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: item.text, image: await readFile(libraryFile(item.image)) })));
+          const { result: bytes, problems } = await untilApproved({
+            attempts: TRY_ON_ATTEMPTS,
+            make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments), feedback) }),
+            check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: reference, image, garments: worn }); },
+            onRetry: retrying(status, TRY_ON_ATTEMPTS),
+          });
           await mkdir(outfitDir, { recursive: true });
           const file = `${date}-${Date.now()}.png`;
           await writeFile(path.join(outfitDir, file), bytes);
-          await saveTryOn(date, key, { status: "ready", image: `/api/import/outfits/${file}` });
+          await saveTryOn(date, key, { status: "ready", image: `/api/import/outfits/${file}`, warnings: problems });
         } catch (error) {
           await saveTryOn(date, key, { status: "failed", error: error.message });
+        } finally {
+          say(status, null);
         }
       })().finally(() => running.delete(lock));
       running.set(lock, task);
@@ -630,9 +703,9 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
     const tryOns = Object.values(await loadPlans())
       .filter((plan) => plan.tryOn && plan.tryOn.status !== "processing" && Date.parse(plan.tryOn.updatedAt) >= since)
       .map((plan) => ({ date: plan.date, name: plan.name, status: plan.tryOn.status }));
-    const backs = (await loadImported())
-      .filter((record) => record.back && record.back.status !== "processing" && Date.parse(record.back.updatedAt) >= since)
-      .map((record) => ({ name: record.name, status: record.back.status }));
+    const backs = (await loadImported()).flatMap((record) => ["back", "front"]
+      .filter((side) => record[side] && record[side].status !== "processing" && Date.parse(record[side].updatedAt) >= since)
+      .map((side) => ({ name: record.name, status: record[side].status, side })));
     return { busy: running.size > 0, reviews, tryOns, backs, cursor };
   }
 
@@ -657,6 +730,9 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       await copyFile(path.join(jobsDir, job.id, modeledSource), path.join(libraryAssetDir, modeledName));
       modeledImage = `${LIBRARY_ASSET_ROOT}/${modeledName}`;
     }
+    // The photo is kept so the cutout can be redone later from the real garment.
+    const sourceName = `${id}-source.png`;
+    await copyFile(path.join(jobsDir, job.id, job.internal.cropFile || job.internal.originalFile), path.join(libraryAssetDir, sourceName));
     const metadata = job.metadata || {};
     const records = await loadImported();
     const existing = records.find((record) => record.id === id);
@@ -672,6 +748,7 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       tags: Array.isArray(metadata.tags) ? metadata.tags : [],
       image: `${LIBRARY_ASSET_ROOT}/${garmentName}`,
       thumbnail: `${LIBRARY_ASSET_ROOT}/${garmentName}`,
+      sourceImage: `${LIBRARY_ASSET_ROOT}/${sourceName}`,
       modeledImage: modeledImage || existing?.modeledImage || null,
       backImage: existing?.backImage || null,
       back: existing?.back || null,
@@ -689,10 +766,12 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
     const task = (async () => {
       const current = await loadJob(job.id);
       const stage = current.stages[stageName];
-      stage.status = "processing"; stage.decision = null; stage.error = null; stage.attempts += 1; stage.updatedAt = new Date().toISOString();
+      stage.status = "processing"; stage.decision = null; stage.error = null; stage.warnings = null; stage.attempts += 1; stage.updatedAt = new Date().toISOString();
       await saveJob(current);
       let failedAssetUrl = null;
       let chromaKeyUsed = null;
+      let warnings = [];
+      const status = `job:${current.id}`;
       try {
         const dir = path.join(jobsDir, current.id);
         const output = path.join(dir, `${stageName}-${stage.attempts}.png`);
@@ -706,11 +785,20 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
           const basePrompt = options.garmentPrompt || buildGarmentPrompt(current.metadata, chromaKeyUsed, { transparent });
           const images = [{ data: selected, role: "the selected photo cropped to the garment; reproduce this exact garment" }];
           if (fullPhoto) images.push({ data: fullPhoto, role: "the full selected photo, for context only" });
-          bytes = await ai.editImage({ model: setting("OPENAI_GARMENT_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1024x1024", transparent, images: await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) }))), prompt: current.stages.garment.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.garment.prompt}` : basePrompt });
-          const rawName = `${stageName}-${stage.attempts}-source.png`;
-          await writeFile(path.join(dir, rawName), bytes);
-          failedAssetUrl = `${ASSET_ROOT}/${current.id}/${rawName}`;
-          bytes = await hasTransparentBackground(bytes) ? await frameTransparentGarment(bytes) : await removeChromaBackground(bytes, chromaKeyUsed);
+          const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
+          const prompt = current.stages.garment.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.garment.prompt}` : basePrompt;
+          ({ result: bytes, problems: warnings } = await untilApproved({
+            attempts: CUTOUT_ATTEMPTS,
+            make: async (feedback, attempt) => {
+              const raw = await ai.editImage({ model: setting("OPENAI_GARMENT_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1024x1024", transparent, images: inputs, prompt: withFeedback(prompt, feedback) });
+              const rawName = `${stageName}-${stage.attempts}-${attempt}-source.png`;
+              await writeFile(path.join(dir, rawName), raw);
+              failedAssetUrl = `${ASSET_ROOT}/${current.id}/${rawName}`;
+              return cleanCutout(raw, chromaKeyUsed);
+            },
+            check: (cutout) => { say(status, "Checking the cutout…"); return reviewCutout(ai, { photo: selected, cutout, metadata: current.metadata }); },
+            onRetry: retrying(status, CUTOUT_ATTEMPTS),
+          }));
         } else {
           const garmentName = current.stages.garment.assetUrl
             ? path.basename(new URL(current.stages.garment.assetUrl, "http://localhost").pathname)
@@ -726,11 +814,18 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
             throw error;
           }
           const basePrompt = options.modeledPrompt || "Create a professional horizontal 3:2 editorial fashion photograph of the person in Image 1 wearing the exact garment from Image 2. Image 3 is the user's original photo of that garment: use it to match its real color, texture and fit, but do not copy its background, wearer or other items. Preserve the person's recognizable identity, face, hair, age and proportions. Preserve every garment color, material, fit, construction, graphic, logo and distinctive detail. Keep the complete featured item clearly visible and unobstructed, use understated neutral supporting clothes, realistic anatomy, natural light, authentic fabric, a tasteful real-world setting, and leave environmental space around the model. No text, watermark, product mockup, or synthetic appearance.";
-          bytes = await ai.editImage({ model: setting("OPENAI_MODELED_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1536x1024", images: await Promise.all([
+          const inputs = await Promise.all([
             { data: modelData, role: "identity reference: the person to photograph" },
             { data: garment.data, role: "the exact garment to dress them in (transparent cutout)" },
             { data: selected, role: "the selected original photo of the garment, for fidelity context only" },
-          ].map(async (image) => ({ ...image, data: await normalizeImage(image.data) }))), prompt: current.stages.modeled.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.modeled.prompt}` : basePrompt });
+          ].map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
+          const prompt = current.stages.modeled.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.modeled.prompt}` : basePrompt;
+          ({ result: bytes, problems: warnings } = await untilApproved({
+            attempts: TRY_ON_ATTEMPTS,
+            make: (feedback) => ai.editImage({ model: setting("OPENAI_MODELED_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1536x1024", images: inputs, prompt: withFeedback(prompt, feedback) }),
+            check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: modelData, image, garments: [{ name: current.metadata.name, text: current.metadata.text, image: garment.data }] }); },
+            onRetry: retrying(status, TRY_ON_ATTEMPTS),
+          }));
         }
         await writeFile(output, bytes);
         const fresh = await loadJob(current.id);
@@ -739,6 +834,7 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         fresh.stages[stageName].failedAssetUrl = null;
         fresh.stages[stageName].cleanupPreviewUrl = null;
         fresh.stages[stageName].cleanupDiagnostics = null;
+        fresh.stages[stageName].warnings = warnings;
         if (chromaKeyUsed) fresh.stages[stageName].chromaKey = chromaKeyUsed;
         fresh.stages[stageName].updatedAt = new Date().toISOString();
         await saveJob(fresh);
@@ -748,6 +844,8 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         if (typeof failedAssetUrl === "string") fresh.stages[stageName].failedAssetUrl = failedAssetUrl;
         if (chromaKeyUsed) fresh.stages[stageName].chromaKey = chromaKeyUsed;
         await saveJob(fresh);
+      } finally {
+        say(status, null);
       }
     })().finally(() => running.delete(lock));
     running.set(lock, task);
@@ -770,7 +868,14 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       }
       const backMatch = url.pathname.match(/^\/api\/import\/wardrobe\/(import-[a-f0-9-]{36})\/back$/i);
       if (backMatch && req.method === "POST") {
-        return json(res, 202, await startBack(backMatch[1], await body(req)));
+        return json(res, 202, await startCutout(backMatch[1], "back", await body(req)));
+      }
+      const frontMatch = url.pathname.match(/^\/api\/import\/wardrobe\/(import-[a-f0-9-]{36})\/front$/i);
+      if (frontMatch && req.method === "POST") {
+        return json(res, 202, await startCutout(frontMatch[1], "front", await body(req)));
+      }
+      if (url.pathname === "/api/import/progress" && req.method === "GET") {
+        return json(res, 200, Object.fromEntries(progress));
       }
       if (backMatch && req.method === "DELETE") {
         return json(res, 200, await removeBack(backMatch[1]));
@@ -787,7 +892,7 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         await Promise.all([
           rm(path.join(libraryAssetDir, `${id}-garment.png`), { force: true }),
           rm(path.join(libraryAssetDir, `${id}-modeled.png`), { force: true }),
-          removed.backImage && rm(path.join(libraryAssetDir, path.basename(removed.backImage)), { force: true }),
+          ...[removed.image, removed.backImage, removed.sourceImage].filter(Boolean).map((image) => rm(libraryFile(image), { force: true })),
         ]);
         return json(res, 200, { deleted: true, id });
       }
@@ -859,14 +964,14 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
         const input = await body(req);
         const image = decodeImage(input);
         const normalizedImage = await normalizeImage(image.data);
-        const detected = (await analyzeClothes(ai, normalizedImage)).map(normalizeMetadata);
+        const progressKey = typeof input.clientId === "string" && /^[\w-]{1,64}$/.test(input.clientId) ? `detect:${input.clientId}` : null;
+        const detected = await detectClothes(ai, normalizedImage, (message) => say(progressKey, message)).finally(() => say(progressKey, null));
         const jobs = [];
-        for (const metadata of detected) {
+        for (const { metadata, crop: croppedImage } of detected) {
           const id = randomUUID();
           const dir = path.join(jobsDir, id); await mkdir(dir, { recursive: true });
           const originalFile = "original.png";
           const cropFile = "crop.png";
-          const croppedImage = await cropDetectedItem(normalizedImage, metadata.boundingBox);
           await writeFile(path.join(dir, originalFile), normalizedImage);
           await writeFile(path.join(dir, cropFile), croppedImage);
           const now = new Date().toISOString();
@@ -993,10 +1098,9 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       outfitDir = path.join(dataDir, "outfit-images");
       // Back cutouts cannot survive a restart either.
       const library = await loadImported().catch(() => []);
-      if (library.some((record) => record.back?.status === "processing")) {
-        for (const record of library) if (record.back?.status === "processing") record.back = { status: "failed", error: "Interrupted, try again" };
-        await atomicJson(importedFile, library);
-      }
+      const interruptedCutouts = library.flatMap((record) => ["back", "front"].filter((side) => record[side]?.status === "processing").map((side) => [record, side]));
+      for (const [record, side] of interruptedCutouts) record[side] = { status: "failed", error: "Interrupted, try again" };
+      if (interruptedCutouts.length) await atomicJson(importedFile, library);
       // A try-on cannot survive a restart; let the user ask again.
       const plans = await loadPlans();
       const interrupted = Object.values(plans).filter((plan) => plan.tryOn?.status === "processing");

@@ -68,7 +68,8 @@ If you are setting up Wardrobe for a user, ask how they want to import their clo
 ## What it does
 
 - Runs on your ChatGPT plan through Codex, or on the OpenAI API with the newest available models
-- Detects every garment in a photo
+- Detects the garments a photo is meant to show, and leaves out background clutter
+- Has a second AI pass review every result (detected pieces, cutouts, try-ons, outfit plans) and retries with its notes, so a cutout that turns "ROTATION" into "RUTGERS" or shows a person gets redone
 - Extracts product cutouts with transparent backgrounds from the photo you picked
 - Generates an optional modeled editorial preview
 - Keeps originals, jobs, generated images, and the JSON database local in `data/`

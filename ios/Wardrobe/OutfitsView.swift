@@ -143,7 +143,15 @@ private struct DayPage: View {
             if let plan, !isStyling {
                 PlanFooter(plan: plan).padding(.horizontal, 24).transition(.opacity)
             } else {
-                Text("Styling…").eyebrow().padding(.horizontal, 24).frame(minHeight: 96, alignment: .top)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Styling…").eyebrow()
+                    if let status = store.progress["plan:\(date)"] {
+                        Text(status).font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2).transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.25), value: store.progress["plan:\(date)"])
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
             }
         }
         .padding(.bottom, 12)
@@ -331,13 +339,20 @@ private struct TryOnBadge: View {
                 .accessibilityLabel("See \(plan.name) on you")
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             case "processing":
-                Label("Dressing you…", systemImage: "sparkles")
-                    .font(.footnote.weight(.medium))
-                    .symbolEffect(.pulse)
-                    .foregroundStyle(Theme.muted)
-                    .padding(.horizontal, 14)
-                    .frame(minHeight: 36)
-                    .background(Theme.ink.opacity(0.06), in: Capsule())
+                VStack(alignment: .trailing, spacing: 6) {
+                    Label("Dressing you…", systemImage: "sparkles")
+                        .font(.footnote.weight(.medium))
+                        .symbolEffect(.pulse)
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 36)
+                        .background(Theme.ink.opacity(0.06), in: Capsule())
+                    if let status = store.progress["tryon:\(plan.date)"] {
+                        Text(status).font(.caption).foregroundStyle(Theme.muted).multilineTextAlignment(.trailing).lineLimit(3)
+                            .frame(maxWidth: 180, alignment: .trailing)
+                            .transition(.opacity)
+                    }
+                }
             default:
                 Button(plan.tryOn?.status == "failed" ? "Try again" : "Try on", systemImage: "person.crop.rectangle") {
                     Task { await store.tryOn(plan) }
@@ -373,6 +388,9 @@ private struct TryOnViewer: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(plan.style).eyebrow()
                     Text(plan.name).font(.display(28))
+                    if let warnings = plan.tryOn?.warnings, !warnings.isEmpty {
+                        ReviewerNote(warnings: warnings).padding(.top, 4)
+                    }
                 }
                 Spacer()
                 Button("Try again", systemImage: "arrow.clockwise") {

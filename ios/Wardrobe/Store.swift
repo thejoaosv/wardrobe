@@ -16,7 +16,9 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var image: String?
     var modeledImage: String?
     var backImage: String?
-    var back: Back?
+    var back: Cutout?
+    /// A redo of the front cutout, while it runs and after.
+    var front: Cutout?
     var unavailable: Bool?
     /// Wears before it needs washing; nil follows the category default.
     var wears: Int?
@@ -24,7 +26,8 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var isAvailable: Bool { unavailable != true }
     var wearLimit: Int { wears ?? Parts.defaultWears[part] ?? 1 }
 
-    struct Back: Codable, Hashable { var status: String; var error: String? }
+    /// warnings are what the AI reviewer still saw wrong after its retries.
+    struct Cutout: Codable, Hashable { var status: String; var error: String?; var warnings: [String]? }
 }
 
 nonisolated struct Plan: Codable, Identifiable, Hashable {
@@ -42,12 +45,13 @@ nonisolated struct Plan: Codable, Identifiable, Hashable {
         var status: String
         var image: String?
         var error: String?
+        var warnings: [String]?
     }
 }
 
 nonisolated struct Job: Codable, Identifiable, Hashable {
     struct Metadata: Codable, Hashable { var name: String; var part: String }
-    struct Stage: Codable, Hashable { var status: String; var assetUrl: String?; var error: String? }
+    struct Stage: Codable, Hashable { var status: String; var assetUrl: String?; var error: String?; var warnings: [String]? }
     struct Stages: Codable, Hashable { var crop: Stage?; var garment: Stage; var modeled: Stage }
     let id: String
     var metadata: Metadata
@@ -112,6 +116,10 @@ final class Store {
     var sheet: AppSheet?
     /// Dates the stylist is working on right now.
     var planningDates: Set<String> = []
+    /// Photos being searched for clothes, by the id the server reports their progress under.
+    var detecting: [String] = []
+    /// What the AI is doing right now ("Checking the cutout…", "Retrying (2/3): …"), keyed like "job:<id>" or "plan:<date>".
+    var progress: [String: String] = [:]
 
     // AI calls through Codex or the API can take minutes.
     private let session: URLSession = {
@@ -202,6 +210,16 @@ final class Store {
         }
     }
 
+    /// Makes the front cutout again, from a new photo or else the photo kept at import.
+    func redoCutout(_ item: Item, jpeg: Data? = nil) async {
+        await Notifier.requestPermission()
+        await run {
+            let body: [String: Any] = jpeg.map { ["imageDataUrl": "data:image/jpeg;base64,\($0.base64EncodedString())"] } ?? [:]
+            let saved: Item = try await send("/api/import/wardrobe/\(item.id)/front", method: "POST", body: body)
+            if let index = items.firstIndex(where: { $0.id == saved.id }) { items[index] = saved }
+        }
+    }
+
     func removeBack(_ item: Item) async {
         await run {
             let saved: Item = try await send("/api/import/wardrobe/\(item.id)/back", method: "DELETE")
@@ -242,8 +260,15 @@ final class Store {
     /// AI work is still running on the Mac (cutouts or try-ons), so a notification is worth waiting for.
     var hasPendingWork: Bool {
         plans.contains { $0.tryOn?.status == "processing" }
-            || items.contains { $0.back?.status == "processing" }
+            || items.contains { $0.back?.status == "processing" || $0.front?.status == "processing" }
             || jobs.contains { ["queued", "processing"].contains($0.current.stage.status) || ($0.current.name == "garment" && $0.current.stage.status == "pending") }
+    }
+
+    /// Anything the AI is working on that the user is watching.
+    var isWorking: Bool { !planningDates.isEmpty || !detecting.isEmpty || hasPendingWork }
+
+    func loadProgress() async {
+        if let latest: [String: String] = try? await send("/api/import/progress") { progress = latest }
     }
 
     func deletePlan(_ plan: Plan) async {
@@ -255,12 +280,15 @@ final class Store {
     }
 
     func importPhoto(_ jpeg: Data) async {
+        let id = UUID().uuidString
+        detecting.append(id)
+        defer { detecting.removeAll { $0 == id } }
         await Notifier.requestPermission()
         // Finding clothes takes a few seconds; keep running if the user leaves and tell them when it's done.
         let task = UIApplication.shared.beginBackgroundTask(withName: "import")
         defer { UIApplication.shared.endBackgroundTask(task) }
         await run {
-            let found: ImportResult = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())"])
+            let found: ImportResult = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())", "clientId": id])
             if UIApplication.shared.applicationState != .active, !found.jobs.isEmpty {
                 Notifier.post("Ready to review", found.jobs.count == 1 ? "Found 1 piece in your photo." : "Found \(found.jobs.count) pieces in your photo.")
             }
