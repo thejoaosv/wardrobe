@@ -139,7 +139,7 @@ Image 1 is the photo the user uploaded to add their clothes. The detector croppe
 ${list}
 
 For every index decide:
-- keep: true only if it is a real wearable garment, shoe or accessory the photo is clearly meant to show, worn by the main person or laid out or held as the subject. false for background items, other people's clothing, things on hangers, chairs or floors behind the subject, items mostly out of frame or hidden under other layers, duplicates of another index, and non-clothing.
+- keep: true only if it is a real wearable garment, shoe or accessory the photo is clearly meant to show, worn by the main person or laid out or held as the subject. false for background items, other people's clothing, things on hangers, chairs or floors behind the subject, items mostly out of frame or hidden under other layers, small accessories (glasses, watches, wristbands, jewelry, bags) that are just worn with an outfit rather than the clear focus of the photo, duplicates of another index, and non-clothing.
 - problem: for kept pieces, a short fix when the crop misses part of the item or mostly shows something else, the category is wrong (upperbody = t-shirts and shirts, midlayer = hoodies, sweaters and fleeces, wholebody_up = jackets and coats), or the name or text is wrong. For dropped pieces, why it was dropped. Empty when all is right.`,
   });
   if (!verdict) return { keep: found.map(() => true), problems: [] };
