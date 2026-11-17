@@ -60,6 +60,7 @@ ${JSON.stringify(history)}
 Rules:
 - Each outfit has exactly one upperbody base top (t-shirt, shirt) and one lowerbody bottom, plus optional midlayer (hoodie, sweater), wholebody_up outer layer (jacket, coat, rain jacket), shoes, and at most one accessories_up item. A midlayer or outer layer never replaces the base top; it goes over it, so a cold day can stack base top + midlayer + outer layer.
 - Dress for each day's weather: warm means base top only, no midlayer or outer layer; mild allows one light layer when the style suits it; cold needs a midlayer, plus an outer layer when one is available; rain needs an outer layer when one is available, plus a midlayer if it is also chilly; auto means judge from the date's usual season.
+- Read each garment's description and text: pair pieces whose fabric, warmth and formality suit each other, and never combine two loud graphics or slogans in one outfit.
 - Match each day's requested style. Use color harmony: tonal or analogous palettes, one statement piece at most.
 - wears is how many times a garment can be worn before it needs washing. Within ${SPACING_DAYS} days either side of any date, a garment may be worn on at most wears dates in total, counting the history and the other days in this plan. So a wears-1 tee should not repeat within ${SPACING_DAYS} days, while wears-3 jeans can be worn on up to three close or consecutive days. Only go past a limit when the wardrobe has no alternative for that part; then reuse the one worn longest ago, preferring neutral basics.
 - Never repeat an exact garment combination from the history or within this plan.
@@ -71,7 +72,7 @@ Rules:
 Return JSON with an outfits array containing one entry per requested date.`;
 }
 
-const pick = ({ id, name, part, color, secondaryColor, tags }) => ({ id, name, part, color, secondaryColor, tags });
+const pick = ({ id, name, part, color, secondaryColor, description, text, tags }) => ({ id, name, part, color, secondaryColor, description, text, tags });
 
 // Keeps only real, available garments, at most one per part, and fails dates without a top and a bottom.
 export function validatePlan(result, { items, days }) {

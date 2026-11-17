@@ -48,6 +48,22 @@ struct ItemSheet: View {
                         }
                     }
 
+                    field("Description") {
+                        TextField("Fabric, fit, warmth, how dressy it is", text: optional(\.description), axis: .vertical)
+                            .font(.body)
+                            .lineLimit(2...6)
+                    }
+
+                    field("Text on it") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            TextField("None", text: optional(\.text), axis: .vertical)
+                                .font(.body)
+                                .lineLimit(1...3)
+                            Text("Exactly as printed, e.g. front: large \"ROTATION\", small \"LX\" below. Cutouts copy it letter for letter.")
+                                .font(.footnote).foregroundStyle(Theme.muted)
+                        }
+                    }
+
                     field("Colors") {
                         HStack(spacing: 20) {
                             ColorPicker("Main", selection: colorBinding(\.color), supportsOpacity: false)
@@ -166,7 +182,8 @@ struct ItemSheet: View {
         .onDisappear {
             addTag()
             if draft.name != original.name || draft.part != original.part || draft.color != original.color
-                || draft.secondaryColor != original.secondaryColor || draft.tags != original.tags || draft.wears != original.wears,
+                || draft.secondaryColor != original.secondaryColor || draft.tags != original.tags || draft.wears != original.wears
+                || draft.description != original.description || draft.text != original.text,
                store.item(original.id) != nil {
                 let edited = draft
                 Task { await store.update(edited) }
@@ -222,6 +239,10 @@ struct ItemSheet: View {
             Text(title).eyebrow()
             content()
         }
+    }
+
+    private func optional(_ key: WritableKeyPath<Item, String?>) -> Binding<String> {
+        Binding(get: { draft[keyPath: key] ?? "" }, set: { draft[keyPath: key] = $0 })
     }
 
     private func colorBinding(_ key: WritableKeyPath<Item, String?>) -> Binding<Color> {

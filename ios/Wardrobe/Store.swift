@@ -8,6 +8,10 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var part: String
     var color: String?
     var secondaryColor: String?
+    /// What a stylist needs to know: fabric, fit, warmth, formality.
+    var description: String?
+    /// Exact printed or embroidered text, with placement; empty when there is none.
+    var text: String?
     var tags: [String]?
     var image: String?
     var modeledImage: String?
@@ -181,7 +185,7 @@ final class Store {
     /// Saves edited details; the server normalizes them and returns the stored piece.
     func update(_ item: Item) async {
         await run {
-            var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? []]
+            var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? [], "description": item.description ?? "", "text": item.text ?? ""]
             body["color"] = item.color
             body["secondaryColor"] = item.secondaryColor ?? NSNull()
             body["wears"] = item.wears ?? NSNull()

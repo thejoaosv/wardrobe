@@ -62,6 +62,8 @@ function normalizeMetadata(value = {}) {
     part: PARTS.has(metadata.part) ? metadata.part : "upperbody",
     color,
     secondaryColor,
+    description: typeof metadata.description === "string" ? metadata.description.trim().slice(0, 400) : "",
+    text: typeof metadata.text === "string" ? metadata.text.trim().slice(0, 200) : "",
     tags: Array.isArray(metadata.tags) ? metadata.tags.filter((tag) => typeof tag === "string").map((tag) => tag.trim().toLowerCase().slice(0, 40)).filter(Boolean).slice(0, 12) : [],
     boundingBox: normalizeBoundingBox(metadata.boundingBox),
   };
@@ -116,6 +118,10 @@ export function buildGarmentPrompt(metadata = {}, chromaKey = "#00ff00", { trans
   const details = Array.isArray(metadata.tags) && metadata.tags.length
     ? metadata.tags.join(", ")
     : "all visible construction and design details";
+  const lettering = metadata.text
+    ? `\n\nText on the garment: ${metadata.text}. Reproduce every word letter for letter with the same font style, size and placement. Never substitute a different or more familiar word.`
+    : "";
+  const description = metadata.description ? `\nDescription: ${metadata.description}` : "";
 
   return `Use case: background-extraction
 Asset type: ecommerce catalog product cutout source
@@ -124,7 +130,7 @@ Input images: Image 1 is the photo the user selected, cropped to this garment, e
 
 Primary request: Reconstruct ONLY the complete empty ${name} (${category}) as a clean, front-facing ecommerce catalog product photograph. If a wearer is present, remove them. Remove every other garment, object, and background element. Show the complete item naturally arranged and symmetrical, with no person, body, mannequin, or hanger visible.
 
-Garment fidelity: Preserve the reference garment's exact primary color ${primary}${secondary}, material and texture, silhouette, neckline, sleeves, fastenings, pattern, and distinctive details (${details}). Preserve any clearly legible existing graphic or logo exactly, but do not invent or reinterpret uncertain logos, text, pockets, seams, hardware, colors, or decoration.
+Garment fidelity: Preserve the reference garment's exact primary color ${primary}${secondary}, material and texture, silhouette, neckline, sleeves, fastenings, pattern, and distinctive details (${details}).${description} Preserve any clearly legible existing graphic or logo exactly, but do not invent or reinterpret uncertain logos, text, pockets, seams, hardware, colors, or decoration.${lettering}
 
 Composition: Centered straight-on product view. Keep the entire garment inside the frame with generous, even padding on every side. No cropping or truncation.
 
@@ -299,7 +305,7 @@ export function tryOnReferences(garments) {
 
 export function buildTryOnPrompt(plan, garments) {
   const refs = tryOnReferences(garments);
-  const references = refs.map(({ item, side }, index) => `Image ${index + 2}: exact ${PART_NAMES[item.part] || "garment"} reference (${item.name}), ${side} view.`).join("\n");
+  const references = refs.map(({ item, side }, index) => `Image ${index + 2}: exact ${PART_NAMES[item.part] || "garment"} reference (${item.name}), ${side} view.${item.text && side === "front" ? ` Its text reads: ${item.text}.` : ""}`).join("\n");
   const backs = refs.filter((ref) => ref.side === "back").map((ref) => ref.item.name);
   const composition = backs.length
     ? `Full body from head to shoes, centered. Pose the person in a natural three-quarter back view, turned about 135 degrees away from the camera and glancing back over the shoulder, so the back of ${backs.join(" and ")} is clearly visible while the face stays recognizable and the front of the outfit is still partly readable.`
@@ -346,9 +352,9 @@ function stageState() {
   return { status: "pending", decision: null, attempts: 0, assetUrl: null, failedAssetUrl: null, cleanupPreviewUrl: null, cleanupTolerance: 46, cleanupDiagnostics: null, error: null, prompt: null, updatedAt: null };
 }
 
-const ANALYZE_PROMPT = "Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Suggest a concise specific name, primary hex color, optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags.";
+const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Name each item specifically enough to tell it apart from similar pieces: color, distinguishing graphic or brand, and type, e.g. "Grey ROTATION LX varsity hoodie" or "Black Dickies chest-logo tee", not "Graphic hoodie". Give a primary hex color, an optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags. description is one or two sentences a stylist can plan with: fabric and weight, fit, warmth, formality, and notable design details. text transcribes, letter for letter, every word printed, embroidered or patched on the item with its placement and relative size, e.g. 'front: large arched "ROTATION", small "LX" centered below'; use an empty string when there is no legible text.`;
 
-const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "tags", "boundingBox"] } } }, required: ["items"] };
+const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, description: { type: "string" }, text: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "description", "text", "tags", "boundingBox"] } } }, required: ["items"] };
 
 async function analyzeClothes(ai, image) {
   const parsed = await ai.json({ prompt: ANALYZE_PROMPT, images: [image], schema: ANALYZE_SCHEMA, kind: "vision" })
@@ -488,11 +494,11 @@ export function wardrobeImportApi(options = {}) {
 
   async function editRecord(id, input) {
     // Invalid values are ignored rather than normalized to defaults, so a bad category never turns a piece into a top.
-    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), tags: Array.isArray, wears: (value) => value === null || (Number.isInteger(value) && value >= 1 && value <= 10) };
+    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), description: (value) => typeof value === "string", text: (value) => typeof value === "string", tags: Array.isArray, wears: (value) => value === null || (Number.isInteger(value) && value >= 1 && value <= 10) };
     const fields = Object.keys(valid).filter((key) => key in input && valid[key](input[key]));
     const record = await updateRecord(id, (record) => {
       const metadata = normalizeMetadata({ ...record, ...Object.fromEntries(fields.map((key) => [key, input[key]])) });
-      Object.assign(record, { name: metadata.name, part: metadata.part, color: metadata.color, secondaryColor: metadata.secondaryColor, tags: metadata.tags, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
+      Object.assign(record, { name: metadata.name, part: metadata.part, color: metadata.color, secondaryColor: metadata.secondaryColor, description: metadata.description, text: metadata.text, tags: metadata.tags, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
       // null goes back to the category default.
       if (input.wears === null) delete record.wears;
       else if (fields.includes("wears")) record.wears = input.wears;
@@ -661,6 +667,8 @@ Back view: Image 1 shows the BACK of this garment. Reconstruct the garment as se
       color: metadata.color || "#d8d0c2",
       secondaryColor: metadata.secondaryColor || null,
       palette: [metadata.color, metadata.secondaryColor].filter(Boolean),
+      description: metadata.description || "",
+      text: metadata.text || "",
       tags: Array.isArray(metadata.tags) ? metadata.tags : [],
       image: `${LIBRARY_ASSET_ROOT}/${garmentName}`,
       thumbnail: `${LIBRARY_ASSET_ROOT}/${garmentName}`,
