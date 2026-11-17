@@ -115,6 +115,25 @@ private struct DayPage: View {
     private var plan: Plan? { store.plans.first { $0.date == date } }
     private var isStyling: Bool { store.planningDates.contains(date) }
 
+    /// Parts the outfit being styled will have, and ones it may or may not get, from its weather and what the closet holds.
+    private var expectedOutfit: (parts: Set<String>, maybe: Set<String>) {
+        let day = store.planning[date]
+        let owned = Set(store.items.filter(\.isAvailable).map(\.part))
+        // A swap keeps the outfit's shape.
+        if day?.replace != nil, let plan {
+            return (Set(plan.garmentIds.compactMap { store.item($0)?.part }), [])
+        }
+        var parts: Set<String> = ["upperbody", "lowerbody", "shoes"]
+        var maybe: Set<String> = []
+        switch day?.weather ?? plan?.weather ?? "auto" {
+        case "warm": break
+        case "cold": parts.formUnion(["midlayer", "wholebody_up"])
+        case "rain": parts.insert("wholebody_up"); maybe.insert("midlayer")
+        default: maybe.insert("midlayer")
+        }
+        return (parts.intersection(owned).union(["upperbody", "lowerbody"]), maybe.intersection(owned))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
@@ -125,7 +144,7 @@ private struct DayPage: View {
 
             Group {
                 if isStyling || plan == nil {
-                    StylingPlaceholder()
+                    StylingPlaceholder(expected: expectedOutfit)
                 } else if let plan {
                     DressedOutfit(items: plan.garmentIds.compactMap(store.item), plan: plan)
                         .id(plan.garmentIds.joined())
@@ -295,22 +314,44 @@ private struct GarmentPiece: View {
     }
 }
 
-/// Soft silhouettes that breathe while the stylist works.
+/// A garment skeleton laid out like DressedOutfit; a layer the stylist may or may not add fades in and out.
 private struct StylingPlaceholder: View {
+    let expected: (parts: Set<String>, maybe: Set<String>)
+    @State private var showsMaybe = false
+
     var body: some View {
+        let parts = expected.parts.union(showsMaybe ? expected.maybe : [])
+        let tops = ["wholebody_up", "midlayer", "upperbody"].filter(parts.contains)
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = geometry.size.height
-            PhaseAnimator([0.35, 0.8]) { opacity in
-                ZStack {
-                    RoundedRectangle(cornerRadius: 28).frame(width: width * 0.7, height: height * 0.34).position(x: width / 2, y: height * 0.2)
-                    RoundedRectangle(cornerRadius: 28).frame(width: width * 0.5, height: height * 0.4).position(x: width / 2, y: height * 0.6)
-                    Capsule().frame(width: width * 0.4, height: height * 0.08).position(x: width / 2, y: height * 0.9)
+            ZStack {
+                ForEach(Array(tops.enumerated()), id: \.element) { index, part in
+                    let slot = topFan[tops.count - 1][index]
+                    GarmentSkeleton(kind: GarmentKind(part: part, name: "hood"))
+                        .frame(width: width * slot.width * 0.86, height: height * 0.34)
+                        .position(x: width * slot.x, y: height * 0.2)
+                        .zIndex(Double(index) + 1)
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
                 }
-                .foregroundStyle(Theme.ink.opacity(0.06))
-                .opacity(opacity)
-            } animation: { _ in .easeInOut(duration: 1.1) }
+                GarmentSkeleton(kind: .pants)
+                    .frame(width: width * 0.8, height: height * 0.4)
+                    .position(x: width * 0.5, y: height * 0.6)
+                if parts.contains("shoes") {
+                    GarmentSkeleton(kind: .shoes)
+                        .frame(width: width * 0.36, height: height * 0.12)
+                        .position(x: width * 0.5, y: height * 0.91)
+                }
+            }
         }
+        .task(id: expected.maybe) {
+            guard !expected.maybe.isEmpty else { return showsMaybe = false }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                withAnimation(Theme.spring) { showsMaybe.toggle() }
+            }
+        }
+        .accessibilityElement()
         .accessibilityLabel("Styling outfit")
     }
 }

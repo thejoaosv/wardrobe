@@ -277,9 +277,8 @@ struct ItemSheet: View {
 
     private func working(_ title: String) -> some View {
         VStack(spacing: 12) {
-            PhaseAnimator([0.4, 1]) { opacity in
-                Image(systemName: "sparkles").font(.system(size: 34, weight: .light)).foregroundStyle(Theme.muted).opacity(opacity)
-            } animation: { _ in .easeInOut(duration: 0.9) }
+            GarmentSkeleton(kind: GarmentKind(part: live.part, name: live.name, tags: live.tags ?? []))
+                .frame(height: 170)
             Text(title).eyebrow()
             if let status {
                 Text(status).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3).padding(.horizontal, 24)

@@ -13,6 +13,7 @@
 		60878F55F4553A65C338A060 /* WardrobeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 084A6071700D2FAB7E223541 /* WardrobeApp.swift */; };
 		6A22BF56F17043286CFF813E /* PlanSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 029F303C4750AA981477CCB4 /* PlanSheet.swift */; };
 		8ADE4B1811A436ACA7B5809B /* ImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04902185595E4887786F863D /* ImportView.swift */; };
+		94419B78FBD123AB764338F9 /* Skeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 386D96D407A7879DF7076A14 /* Skeleton.swift */; };
 		9F6EBD6F4E3C660F28A1ED7E /* ClosetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEB59E1F460F3544B425A920 /* ClosetView.swift */; };
 		A20F6D774C030DE356784A99 /* ItemSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C0FDC0D3907E728A5F2CE8 /* ItemSheet.swift */; };
 		ADAB7F54C55064058A29909A /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC6B1412E04E581BEB618E05 /* Theme.swift */; };
@@ -23,6 +24,7 @@
 		029F303C4750AA981477CCB4 /* PlanSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanSheet.swift; sourceTree = "<group>"; };
 		04902185595E4887786F863D /* ImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportView.swift; sourceTree = "<group>"; };
 		084A6071700D2FAB7E223541 /* WardrobeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeApp.swift; sourceTree = "<group>"; };
+		386D96D407A7879DF7076A14 /* Skeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Skeleton.swift; sourceTree = "<group>"; };
 		3AB04044E8BC4E5A9D3049D7 /* OutfitsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutfitsView.swift; sourceTree = "<group>"; };
 		6066D187937D9F68A8835450 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9216D41C7EF0F36D0C6F6554 /* Wardrobe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Wardrobe.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -62,6 +64,7 @@
 				CE5DDC8A9D086B17F25385E5 /* Notifier.swift */,
 				3AB04044E8BC4E5A9D3049D7 /* OutfitsView.swift */,
 				029F303C4750AA981477CCB4 /* PlanSheet.swift */,
+				386D96D407A7879DF7076A14 /* Skeleton.swift */,
 				93FCCA6098735296E0A4430E /* Store.swift */,
 				EC6B1412E04E581BEB618E05 /* Theme.swift */,
 				084A6071700D2FAB7E223541 /* WardrobeApp.swift */,
@@ -146,6 +149,7 @@
 				2B1C303A013974C4561B45A2 /* Notifier.swift in Sources */,
 				D0849288E668AF2545F52487 /* OutfitsView.swift in Sources */,
 				6A22BF56F17043286CFF813E /* PlanSheet.swift in Sources */,
+				94419B78FBD123AB764338F9 /* Skeleton.swift in Sources */,
 				0DA463A0A15F6C6CCB56B4C2 /* Store.swift in Sources */,
 				ADAB7F54C55064058A29909A /* Theme.swift in Sources */,
 				60878F55F4553A65C338A060 /* WardrobeApp.swift in Sources */,

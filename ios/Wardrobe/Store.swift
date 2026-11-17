@@ -114,8 +114,9 @@ final class Store {
     var connectionError: String?
     /// The sheet the root view presents (chooser, plan or import).
     var sheet: AppSheet?
-    /// Dates the stylist is working on right now.
-    var planningDates: Set<String> = []
+    /// Days the stylist is working on right now, by date; their weather shapes the loading skeleton.
+    var planning: [String: PlanDay] = [:]
+    var planningDates: Set<String> { Set(planning.keys) }
     /// Photos being searched for clothes, by the id the server reports their progress under.
     var detecting: [String] = []
     /// What the AI is doing right now ("Checking the cutout…", "Retrying (2/3): …"), keyed like "job:<id>" or "plan:<date>".
@@ -236,8 +237,8 @@ final class Store {
 
     func generate(_ days: [PlanDay]) async {
         let dates = Set(days.map { Day.string($0.date) })
-        planningDates.formUnion(dates)
-        defer { planningDates.subtract(dates) }
+        for day in days { planning[Day.string(day.date)] = day }
+        defer { for date in dates { planning[date] = nil } }
         await run {
             let body = days.map { day in
                 var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather]

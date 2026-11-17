@@ -67,7 +67,7 @@ private struct JobCard: View {
         let (name, stage) = job.current
         let step = name == "crop" ? "Is this the right piece?" : "Cutout"
         let waiting = ["queued", "processing", "pending"].contains(stage.status)
-        ReviewCard(title: job.metadata.name, subtitle: waiting ? "Cutting out" : step, status: waiting ? store.progress["job:\(job.id)"] : nil, imageURL: waiting ? nil : store.url(stage.assetUrl)) {
+        ReviewCard(title: job.metadata.name, subtitle: waiting ? "Cutting out" : step, status: waiting ? store.progress["job:\(job.id)"] : nil, skeleton: GarmentKind(part: job.metadata.part, name: job.metadata.name), imageURL: waiting ? nil : store.url(stage.assetUrl)) {
             switch stage.status {
             case "review":
                 if let warnings = stage.warnings, !warnings.isEmpty {
@@ -115,6 +115,8 @@ private struct ReviewCard<Actions: View>: View {
     let subtitle: String
     /// The AI's live status, e.g. "Retrying (2/3): …".
     var status: String? = nil
+    /// Silhouette shown while waiting; nil cycles through kinds of clothing.
+    var skeleton: GarmentKind? = nil
     let imageURL: URL?
     @ViewBuilder let actions: Actions
 
@@ -125,10 +127,10 @@ private struct ReviewCard<Actions: View>: View {
                     AsyncImage(url: imageURL, transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                         if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) }
                     }
+                } else if let skeleton {
+                    GarmentSkeleton(kind: skeleton).padding(.vertical, 16).transition(.opacity)
                 } else {
-                    PhaseAnimator([0.4, 1]) { opacity in
-                        Image(systemName: "sparkles").font(.system(size: 36, weight: .light)).foregroundStyle(Theme.muted).opacity(opacity)
-                    } animation: { _ in .easeInOut(duration: 0.9) }
+                    CyclingGarmentSkeleton().padding(.vertical, 16).transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity)
