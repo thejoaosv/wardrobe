@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback } from "./ai-review.mjs";
 import { createAIProvider } from "./openai-provider.mjs";
 import { parseChangelog } from "./changelog.mjs";
+import { createKeyedLock, createQueue } from "./queue.mjs";
 import { DATE, DEFAULT_WEARS, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
@@ -15,7 +16,7 @@ const DECISIONS = new Set(["approve", "reject"]);
 const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 // Bumped when the app needs endpoints or fields an older server lacks; the app compares it with its minimum.
-export const API_VERSION = 4;
+export const API_VERSION = 5;
 const SETTINGS = { checks: new Set(["thorough", "fast"]) };
 // wears: how many times each category is worn before washing, unless a piece sets its own.
 const DEFAULT_SETTINGS = { checks: "thorough", wears: DEFAULT_WEARS };
@@ -91,9 +92,15 @@ function normalizeBoundingBox(value = {}) {
   return { x, y, width, height };
 }
 
+// 2048px is more than the AI uses; bigger photos only make every copy, upload and preview slower.
 async function normalizeImage(bytes) {
-  return sharp(bytes).rotate().toColorspace("srgb").png().toBuffer();
+  return sharp(bytes).rotate().resize(2048, 2048, { fit: "inside", withoutEnlargement: true }).toColorspace("srgb").png().toBuffer();
 }
+
+const previewWidth = (url) => {
+  const width = Number(url.searchParams.get("w"));
+  return Number.isInteger(width) && width >= 64 && width <= 2048 ? width : null;
+};
 
 async function cropDetectedItem(bytes, boundingBox) {
   const normalized = await normalizeImage(bytes);
@@ -411,9 +418,20 @@ export function wardrobeImportApi(options = {}) {
   let plansFile;
   let outfitDir;
   const running = new Map();
+  const detectQueue = createQueue(2);
+  const jobLock = createKeyedLock();
+  // Photos being searched for clothes in the background, by id. Their photo stays on disk until done, so a restart resumes them.
+  const detections = new Map();
+  // Days being styled in the background, by date; a failure stays until the app has seen it.
+  const styling = new Map();
+  // Small WebP previews of stored PNGs, keyed by file, width and change time.
+  const previews = new Map();
+  let detectionsDir;
   // Live status lines for running AI work ("Checking the cutout…"), keyed by what they belong to; the app polls them.
   const progress = new Map();
   const say = (key, message) => { if (key) (message ? progress.set(key, message) : progress.delete(key)); };
+  const waiting = (key) => (ahead) => say(key, ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…");
+  const queued = (key, task) => imageQueue(() => { say(key, null); return task(); }, waiting(key));
   const retrying = (key, total) => (problems, attempt) => say(key, `Retrying (${attempt}/${total}): ${problems[0]}`);
   const libraryFile = (url) => path.join(libraryAssetDir, path.basename(url));
   let settingsFile;
@@ -463,6 +481,8 @@ export function wardrobeImportApi(options = {}) {
   const serial = (task) => (writeQueue = writeQueue.then(task, task));
   const setting = (name, fallback = "") => options.env?.[name] || process.env[name] || fallback;
   const ai = createAIProvider(setting);
+  // Image work (cutouts, try-ons) runs a few at a time so the Mac and the plan's rate limits aren't swamped; the rest wait in line.
+  const imageQueue = createQueue(Math.max(1, Number(setting("WARDROBE_AI_CONCURRENCY", "2")) || 2));
 
   async function setupStatus() {
     const { provider, hasApiKey, hasCodex } = await ai.status();
@@ -621,7 +641,7 @@ export function wardrobeImportApi(options = {}) {
       throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
     }
     const key = `cutout:${id}`;
-    const task = (async () => {
+    const task = queued(key, async () => {
       try {
         const chromaKey = chooseChromaKey(record.color);
         const transparent = (await ai.status()).provider === "codex";
@@ -669,7 +689,7 @@ export function wardrobeImportApi(options = {}) {
       } finally {
         say(key, null);
       }
-    })().finally(() => running.delete(lock));
+    }).finally(() => running.delete(lock));
     running.set(lock, task);
     return record;
   }
@@ -721,7 +741,7 @@ export function wardrobeImportApi(options = {}) {
       const key = plan.garmentIds.join("+");
       await saveTryOn(date, key, { status: "processing" }).catch((error) => { running.delete(lock); throw error; });
       const status = `tryon:${date}`;
-      const task = (async () => {
+      const task = queued(status, async () => {
         try {
           const images = [{ data: reference, role: "identity reference: the exact person to dress" }];
           for (const { item, side, image } of tryOnReferences(garments)) {
@@ -744,7 +764,7 @@ export function wardrobeImportApi(options = {}) {
         } finally {
           say(status, null);
         }
-      })().finally(() => running.delete(lock));
+      }).finally(() => running.delete(lock));
       running.set(lock, task);
     }
     return planList(await loadPlans());
@@ -766,6 +786,99 @@ export function wardrobeImportApi(options = {}) {
       .filter((side) => record[side] && record[side].status !== "processing" && Date.parse(record[side].updatedAt) >= since)
       .map((side) => ({ name: record.name, status: record[side].status, side })));
     return { busy: running.size > 0, reviews, tryOns, backs, cursor };
+  }
+
+  // One review job per detected piece, starting at its crop.
+  async function createJobs(photo, detected) {
+    const jobs = [];
+    for (const { metadata, crop } of detected) {
+      const id = randomUUID();
+      const dir = path.join(jobsDir, id);
+      await mkdir(dir, { recursive: true });
+      const originalFile = "original.png";
+      const cropFile = "crop.png";
+      await writeFile(path.join(dir, originalFile), photo);
+      await writeFile(path.join(dir, cropFile), crop);
+      const now = new Date().toISOString();
+      const cropStage = { ...stageState(), status: "review", assetUrl: `${ASSET_ROOT}/${id}/${cropFile}`, updatedAt: now };
+      const job = { id, status: "active", metadata, stages: { crop: cropStage, garment: stageState(), modeled: stageState() }, createdAt: now, updatedAt: now, internal: { originalFile, cropFile, originalMime: "image/png" } };
+      job.originalAssetUrl = `${ASSET_ROOT}/${id}/${originalFile}`;
+      await saveJob(job);
+      jobs.push(job);
+    }
+    return jobs;
+  }
+
+  // Finds clothes in a photo in the background, so a phone that sleeps or loses Wi-Fi mid-way loses nothing.
+  // A retried upload with the same id joins the detection already there instead of starting a second one.
+  async function startDetection(photo, clientId) {
+    const id = clientId || randomUUID();
+    if (detections.has(id)) return detections.get(id);
+    const file = path.join(detectionsDir, `${id}.png`);
+    await writeFile(file, photo);
+    return runDetection(id, file, photo);
+  }
+
+  function runDetection(id, file, photo) {
+    const detection = { id, status: "working", message: null, found: 0, error: null, updatedAt: Date.now() };
+    detections.set(id, detection);
+    const report = (message) => Object.assign(detection, { message, updatedAt: Date.now() });
+    const task = detectQueue(async () => {
+      report(null);
+      try {
+        const jobs = await createJobs(photo, await detectClothes(ai, photo, report, reviewed));
+        Object.assign(detection, { status: "done", found: jobs.length, message: null, updatedAt: Date.now() });
+      } catch (error) {
+        Object.assign(detection, { status: "failed", error: error.message, message: null, updatedAt: Date.now() });
+      } finally {
+        await rm(file, { force: true });
+      }
+    }, (ahead) => report(ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…"));
+    running.set(`detect:${id}`, task);
+    task.finally(() => running.delete(`detect:${id}`));
+    return detection;
+  }
+
+  // Finished detections that found pieces disappear after a minute; failures and empty photos wait to be dismissed.
+  function detectionList() {
+    for (const [id, detection] of detections) {
+      if (detection.status === "done" && detection.found > 0 && Date.now() - detection.updatedAt > 60 * 1000) detections.delete(id);
+    }
+    return [...detections.values()];
+  }
+
+  // Styles days in the background; the app polls the list and the plans.
+  function startStyling(input) {
+    const dates = Array.isArray(input.days) ? input.days.map((day) => day?.date) : [];
+    if (!dates.length || dates.some((date) => typeof date !== "string" || !DATE.test(date))) throw Object.assign(new Error("Each day needs a YYYY-MM-DD date"), { status: 400 });
+    if (dates.some((date) => styling.get(date)?.status === "working")) throw Object.assign(new Error("That day is already being styled"), { status: 409 });
+    for (const date of dates) styling.set(date, { date, status: "working", error: null });
+    const key = `plan:${dates.join(",")}`;
+    const task = planOutfits(input).then(
+      () => dates.forEach((date) => styling.delete(date)),
+      (error) => dates.forEach((date) => styling.set(date, { date, status: "failed", error: error.message })),
+    );
+    running.set(key, task);
+    task.finally(() => running.delete(key));
+    return [...styling.values()];
+  }
+
+  async function sendImage(res, file, width, cacheControl) {
+    const info = await stat(file);
+    res.setHeader("Cache-Control", cacheControl);
+    if (!width) {
+      res.setHeader("Content-Type", file.endsWith(".svg") ? "image/svg+xml" : "image/png");
+      return res.end(await readFile(file));
+    }
+    const cacheKey = `${file}:${width}:${info.mtimeMs}`;
+    let bytes = previews.get(cacheKey);
+    if (!bytes) {
+      bytes = await sharp(file).resize({ width, height: width, fit: "inside", withoutEnlargement: true }).webp({ quality: 82 }).toBuffer();
+      previews.set(cacheKey, bytes);
+      if (previews.size > 400) previews.delete(previews.keys().next().value);
+    }
+    res.setHeader("Content-Type", "image/webp");
+    return res.end(bytes);
   }
 
   function persistImported(job, includeModeled = false) {
@@ -822,15 +935,22 @@ export function wardrobeImportApi(options = {}) {
   async function generate(job, stageName) {
     const lock = `${job.id}:${stageName}`;
     if (running.has(lock)) return running.get(lock);
-    const task = (async () => {
-      const current = await loadJob(job.id);
+    const status = `job:${job.id}`;
+    const task = queued(status, async () => {
+      const current = await jobLock(job.id, async () => {
+        const current = await loadJob(job.id);
+        // Discarded while it waited in line.
+        if (!current) return null;
+        const stage = current.stages[stageName];
+        stage.status = "processing"; stage.decision = null; stage.error = null; stage.warnings = null; stage.attempts += 1; stage.updatedAt = new Date().toISOString();
+        await saveJob(current);
+        return current;
+      });
+      if (!current) return;
       const stage = current.stages[stageName];
-      stage.status = "processing"; stage.decision = null; stage.error = null; stage.warnings = null; stage.attempts += 1; stage.updatedAt = new Date().toISOString();
-      await saveJob(current);
       let failedAssetUrl = null;
       let chromaKeyUsed = null;
       let warnings = [];
-      const status = `job:${current.id}`;
       try {
         const dir = path.join(jobsDir, current.id);
         const output = path.join(dir, `${stageName}-${stage.attempts}.png`);
@@ -849,6 +969,7 @@ export function wardrobeImportApi(options = {}) {
           ({ result: bytes, problems: warnings } = await reviewed({
             attempts: CUTOUT_ATTEMPTS,
             make: async (feedback, attempt) => {
+              if (!(await loadJob(current.id))) throw Object.assign(new Error("Discarded"), { cancelled: true });
               const raw = await ai.editImage({ model: setting("OPENAI_GARMENT_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1024x1024", transparent, images: inputs, prompt: withFeedback(prompt, feedback) });
               const rawName = `${stageName}-${stage.attempts}-${attempt}-source.png`;
               await writeFile(path.join(dir, rawName), raw);
@@ -887,7 +1008,9 @@ export function wardrobeImportApi(options = {}) {
           }));
         }
         await writeFile(output, bytes);
+        await jobLock(current.id, async () => {
         const fresh = await loadJob(current.id);
+        if (!fresh) return;
         fresh.stages[stageName].status = "review";
         fresh.stages[stageName].assetUrl = `${ASSET_ROOT}/${fresh.id}/${path.basename(output)}`;
         fresh.stages[stageName].failedAssetUrl = null;
@@ -897,16 +1020,20 @@ export function wardrobeImportApi(options = {}) {
         if (chromaKeyUsed) fresh.stages[stageName].chromaKey = chromaKeyUsed;
         fresh.stages[stageName].updatedAt = new Date().toISOString();
         await saveJob(fresh);
+        });
       } catch (error) {
-        const fresh = await loadJob(current.id);
-        fresh.stages[stageName].status = "failed"; fresh.stages[stageName].error = error.message; fresh.stages[stageName].updatedAt = new Date().toISOString();
-        if (typeof failedAssetUrl === "string") fresh.stages[stageName].failedAssetUrl = failedAssetUrl;
-        if (chromaKeyUsed) fresh.stages[stageName].chromaKey = chromaKeyUsed;
-        await saveJob(fresh);
+        await jobLock(current.id, async () => {
+          const fresh = await loadJob(current.id);
+          if (!fresh) return;
+          fresh.stages[stageName].status = "failed"; fresh.stages[stageName].error = error.message; fresh.stages[stageName].updatedAt = new Date().toISOString();
+          if (typeof failedAssetUrl === "string") fresh.stages[stageName].failedAssetUrl = failedAssetUrl;
+          if (chromaKeyUsed) fresh.stages[stageName].chromaKey = chromaKeyUsed;
+          await saveJob(fresh);
+        });
       } finally {
         say(status, null);
       }
-    })().finally(() => running.delete(lock));
+    }).finally(() => running.delete(lock));
     running.set(lock, task);
     return task;
   }
@@ -934,9 +1061,7 @@ export function wardrobeImportApi(options = {}) {
         return json(res, 200, await saveModelReference(await body(req)));
       }
       if (url.pathname === "/api/import/model-reference" && req.method === "GET") {
-        res.setHeader("Content-Type", "image/png");
-        res.setHeader("Cache-Control", "no-store");
-        return res.end(await readFile(path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png"))));
+        return sendImage(res, path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png")), previewWidth(url), "no-store");
       }
       const wardrobeDeleteMatch = url.pathname.match(/^\/api\/import\/wardrobe\/(import-[a-f0-9-]{36})$/i);
       if (wardrobeDeleteMatch && req.method === "PATCH") {
@@ -987,7 +1112,17 @@ export function wardrobeImportApi(options = {}) {
         return json(res, 200, await planList(await loadPlans()));
       }
       if (url.pathname === "/api/import/plans" && req.method === "POST") {
-        return json(res, 200, await planOutfits(await body(req)));
+        const input = await body(req);
+        if (input.background === true) return json(res, 202, startStyling(input));
+        return json(res, 200, await planOutfits(input));
+      }
+      if (url.pathname === "/api/import/plans/styling" && req.method === "GET") {
+        return json(res, 200, [...styling.values()]);
+      }
+      const stylingMatch = url.pathname.match(/^\/api\/import\/plans\/styling\/(\d{4}-\d{2}-\d{2})$/);
+      if (stylingMatch && req.method === "DELETE") {
+        if (styling.get(stylingMatch[1])?.status === "failed") styling.delete(stylingMatch[1]);
+        return json(res, 200, [...styling.values()]);
       }
       const tryOnMatch = url.pathname.match(/^\/api\/import\/plans\/(\d{4}-\d{2}-\d{2})\/try-on$/);
       if (tryOnMatch && req.method === "POST") {
@@ -999,11 +1134,7 @@ export function wardrobeImportApi(options = {}) {
       }
       const outfitAssetMatch = url.pathname.match(/^\/api\/import\/outfits\/([\w.-]+\.png)$/);
       if (outfitAssetMatch && req.method === "GET") {
-        const file = path.join(outfitDir, path.basename(outfitAssetMatch[1]));
-        await stat(file);
-        res.setHeader("Content-Type", "image/png");
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        return res.end(await readFile(file));
+        return sendImage(res, path.join(outfitDir, path.basename(outfitAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
       }
       const planMatch = url.pathname.match(/^\/api\/import\/plans\/(\d{4}-\d{2}-\d{2})$/);
       if (planMatch && req.method === "DELETE") {
@@ -1018,19 +1149,11 @@ export function wardrobeImportApi(options = {}) {
       }
       const libraryAssetMatch = url.pathname.match(/^\/api\/import\/library\/([\w.-]+)$/i);
       if (libraryAssetMatch && req.method === "GET") {
-        const file = path.join(libraryAssetDir, path.basename(libraryAssetMatch[1]));
-        await stat(file);
-        res.setHeader("Content-Type", "image/png");
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        return res.end(await readFile(file));
+        return sendImage(res, path.join(libraryAssetDir, path.basename(libraryAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
       }
       const assetMatch = url.pathname.match(/^\/api\/import\/assets\/([a-f0-9-]{36})\/([\w.-]+)$/i);
       if (assetMatch && req.method === "GET") {
-        const file = path.join(jobsDir, assetMatch[1], path.basename(assetMatch[2]));
-        await stat(file);
-        res.setHeader("Content-Type", file.endsWith(".svg") ? "image/svg+xml" : "image/png");
-        res.setHeader("Cache-Control", "no-store");
-        return res.end(await readFile(file));
+        return sendImage(res, path.join(jobsDir, assetMatch[1], path.basename(assetMatch[2])), previewWidth(url), "no-store");
       }
       if (url.pathname === API_ROOT && req.method === "POST") {
         const setup = await setupStatus();
@@ -1038,25 +1161,20 @@ export function wardrobeImportApi(options = {}) {
           return json(res, 503, { error: "Setup required: run `codex login` (ChatGPT plan) or add OPENAI_API_KEY to .env, then restart the app." });
         }
         const input = await body(req);
-        const image = decodeImage(input);
-        const normalizedImage = await normalizeImage(image.data);
-        const progressKey = typeof input.clientId === "string" && /^[\w-]{1,64}$/.test(input.clientId) ? `detect:${input.clientId}` : null;
-        const detected = await detectClothes(ai, normalizedImage, (message) => say(progressKey, message), reviewed).finally(() => say(progressKey, null));
-        const jobs = [];
-        for (const { metadata, crop: croppedImage } of detected) {
-          const id = randomUUID();
-          const dir = path.join(jobsDir, id); await mkdir(dir, { recursive: true });
-          const originalFile = "original.png";
-          const cropFile = "crop.png";
-          await writeFile(path.join(dir, originalFile), normalizedImage);
-          await writeFile(path.join(dir, cropFile), croppedImage);
-          const now = new Date().toISOString();
-          const cropStage = { ...stageState(), status: "review", assetUrl: `${ASSET_ROOT}/${id}/${cropFile}`, updatedAt: now };
-          const job = { id, status: "active", metadata, stages: { crop: cropStage, garment: stageState(), modeled: stageState() }, createdAt: now, updatedAt: now, internal: { originalFile, cropFile, originalMime: "image/png" } };
-          job.originalAssetUrl = `${ASSET_ROOT}/${id}/${originalFile}`;
-          await saveJob(job); jobs.push(publicJob(job));
-        }
-        return json(res, 202, { jobs, noClothingDetected: jobs.length === 0 });
+        const photo = await normalizeImage(decodeImage(input).data);
+        const clientId = typeof input.clientId === "string" && /^[\w-]{1,64}$/.test(input.clientId) ? input.clientId : null;
+        if (input.background === true) return json(res, 202, await startDetection(photo, clientId));
+        // The web app still waits for the result in the request.
+        const jobs = await createJobs(photo, await detectClothes(ai, photo, () => {}, reviewed));
+        return json(res, 202, { jobs: jobs.map(publicJob), noClothingDetected: jobs.length === 0 });
+      }
+      if (url.pathname === "/api/import/detections" && req.method === "GET") {
+        return json(res, 200, detectionList());
+      }
+      const detectionMatch = url.pathname.match(/^\/api\/import\/detections\/([\w-]{1,64})$/);
+      if (detectionMatch && req.method === "DELETE") {
+        if (detections.get(detectionMatch[1])?.status !== "working") detections.delete(detectionMatch[1]);
+        return json(res, 200, detectionList());
       }
       if (url.pathname === API_ROOT && req.method === "GET") {
         const ids = await readdir(jobsDir).catch(() => []);
@@ -1068,94 +1186,103 @@ export function wardrobeImportApi(options = {}) {
       }
       const match = url.pathname.match(/^\/api\/import\/jobs\/([a-f0-9-]{36})(?:\/(.*))?$/i);
       if (!match) return json(res, 404, { error: "Not found" });
-      const job = await loadJob(match[1]);
-      if (!job) return json(res, 404, { error: "Job not found" });
       const action = match[2] || "";
-      if (!action && req.method === "GET") return json(res, 200, publicJob(job));
-      if (!action && req.method === "DELETE") {
-        await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
-        return json(res, 200, { deleted: true, id: job.id });
-      }
-      if (action === "metadata" && (req.method === "PATCH" || req.method === "PUT")) {
-        const input = await body(req);
-        if (!input.metadata || typeof input.metadata !== "object" || Array.isArray(input.metadata)) throw Object.assign(new Error("metadata must be an object"), { status: 400 });
-        job.metadata = normalizeMetadata({ ...job.metadata, ...input.metadata }); await saveJob(job);
-        return json(res, 200, publicJob(job));
-      }
-      const cleanupAction = action.match(/^stages\/garment\/(cleanup-preview|cleanup-accept)$/);
-      if (cleanupAction && req.method === "POST") {
-        const stage = job.stages.garment;
-        if (stage.status !== "failed" || !stage.failedAssetUrl) {
-          throw Object.assign(new Error("No failed garment source is available for cleanup"), { status: 409 });
-        }
-        const input = await body(req);
-        const tolerance = cleanupTolerance(input.tolerance);
-        const sourceName = path.basename(new URL(stage.failedAssetUrl, "http://localhost").pathname);
-        const source = await readFile(path.join(jobsDir, job.id, sourceName));
-        const key = stage.chromaKey || chooseChromaKey(job.metadata?.color);
-        const cleaned = await processChromaBackground(source, key, { tolerance });
-        const previewName = `garment-${stage.attempts}-cleanup-${tolerance}.png`;
-        const previewUrl = `${ASSET_ROOT}/${job.id}/${previewName}`;
-        await writeFile(path.join(jobsDir, job.id, previewName), cleaned.bytes);
-        stage.chromaKey = key;
-        stage.cleanupTolerance = cleaned.tolerance;
-        stage.cleanupDiagnostics = cleaned.verification;
-        stage.cleanupPreviewUrl = previewUrl;
-        stage.updatedAt = new Date().toISOString();
-        if (cleanupAction[1] === "cleanup-accept") {
-          stage.status = "review";
-          stage.decision = null;
-          stage.error = null;
-          stage.assetUrl = previewUrl;
-        }
-        await saveJob(job);
-        return json(res, 200, publicJob(job));
-      }
       const stageMatch = action.match(/^stages\/(crop|garment|modeled)\/(approve|reject|regenerate)$/);
-      if (stageMatch && req.method === "POST") {
-        const [, stageName, decision] = stageMatch;
-        if (!STAGES.has(stageName)) throw Object.assign(new Error("Invalid stage"), { status: 400 });
-        if (decision === "regenerate") {
-          if (stageName === "crop") throw Object.assign(new Error("Upload the image again to create new crops"), { status: 400 });
-          const input = await body(req);
-          job.stages[stageName].prompt = typeof input.prompt === "string" ? input.prompt.trim().slice(0, 1200) || null : null;
-          job.stages[stageName].status = "queued";
-          job.stages[stageName].decision = null;
-          await saveJob(job);
-          void generate(job, stageName);
-          return json(res, 202, publicJob(job));
+      const input = ["POST", "PATCH", "PUT"].includes(req.method) ? await body(req) : {};
+      // Every change to a job runs under its lock, so a double tap or a generation finishing at the same moment waits its turn.
+      const [statusCode, value] = await jobLock(match[1], async () => {
+        const job = await loadJob(match[1]);
+        if (!job) {
+          // Approving or discarding a piece that already finished, e.g. a request retried after the phone lost Wi-Fi, is not an error.
+          if (stageMatch && stageMatch[2] !== "regenerate") return [200, { id: match[1], gone: true }];
+          if (!action && req.method === "DELETE") return [200, { deleted: true, id: match[1] }];
+          throw Object.assign(new Error("Job not found"), { status: 404 });
         }
-        if (!DECISIONS.has(decision) || job.stages[stageName].status !== "review") throw Object.assign(new Error("Stage is not ready for review"), { status: 409 });
-        const previousStatus = job.stages[stageName].status;
-        const previousDecision = job.stages[stageName].decision;
-        const previousJobStatus = job.status;
-        job.stages[stageName].decision = decision === "approve" ? "approved" : "rejected";
-        job.stages[stageName].status = job.stages[stageName].decision;
-        job.stages[stageName].error = null;
-        job.stages[stageName].updatedAt = new Date().toISOString();
-        const startGarment = stageName === "crop" && decision === "approve" && job.stages.garment.status === "pending";
-        await saveJob(job);
-        if (decision === "approve" && stageName !== "crop") {
-          try {
-            await persistImported(job, stageName === "modeled");
-            // Imports finish at the cutout. Marked complete only after the copy, because listing jobs deletes complete ones.
-            job.status = "complete";
-            await saveJob(job);
-          } catch (error) {
-            job.stages[stageName].status = previousStatus;
-            job.stages[stageName].decision = previousDecision;
-            job.status = previousJobStatus;
-            await saveJob(job);
-            throw error;
+        if (!action && req.method === "GET") return [200, publicJob(job)];
+        if (!action && req.method === "DELETE") {
+          await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
+          return [200, { deleted: true, id: job.id }];
+        }
+        if (action === "metadata" && (req.method === "PATCH" || req.method === "PUT")) {
+          if (!input.metadata || typeof input.metadata !== "object" || Array.isArray(input.metadata)) throw Object.assign(new Error("metadata must be an object"), { status: 400 });
+          job.metadata = normalizeMetadata({ ...job.metadata, ...input.metadata }); await saveJob(job);
+          return [200, publicJob(job)];
+        }
+        const cleanupAction = action.match(/^stages\/garment\/(cleanup-preview|cleanup-accept)$/);
+        if (cleanupAction && req.method === "POST") {
+          const stage = job.stages.garment;
+          if (stage.status !== "failed" || !stage.failedAssetUrl) {
+            throw Object.assign(new Error("No failed garment source is available for cleanup"), { status: 409 });
           }
+          const tolerance = cleanupTolerance(input.tolerance);
+          const sourceName = path.basename(new URL(stage.failedAssetUrl, "http://localhost").pathname);
+          const source = await readFile(path.join(jobsDir, job.id, sourceName));
+          const key = stage.chromaKey || chooseChromaKey(job.metadata?.color);
+          const cleaned = await processChromaBackground(source, key, { tolerance });
+          const previewName = `garment-${stage.attempts}-cleanup-${tolerance}.png`;
+          const previewUrl = `${ASSET_ROOT}/${job.id}/${previewName}`;
+          await writeFile(path.join(jobsDir, job.id, previewName), cleaned.bytes);
+          stage.chromaKey = key;
+          stage.cleanupTolerance = cleaned.tolerance;
+          stage.cleanupDiagnostics = cleaned.verification;
+          stage.cleanupPreviewUrl = previewUrl;
+          stage.updatedAt = new Date().toISOString();
+          if (cleanupAction[1] === "cleanup-accept") {
+            stage.status = "review";
+            stage.decision = null;
+            stage.error = null;
+            stage.assetUrl = previewUrl;
+          }
+          await saveJob(job);
+          return [200, publicJob(job)];
         }
-        if (decision === "reject") await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
-        if (startGarment) void generate(job, "garment");
-        const response = publicJob(job);
-        if (job.status === "complete") await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
-        return json(res, 200, response);
-      }
-      return json(res, 404, { error: "Not found" });
+        if (stageMatch && req.method === "POST") {
+          const [, stageName, decision] = stageMatch;
+          if (!STAGES.has(stageName)) throw Object.assign(new Error("Invalid stage"), { status: 400 });
+          if (decision === "regenerate") {
+            if (stageName === "crop") throw Object.assign(new Error("Upload the image again to create new crops"), { status: 400 });
+            if (running.has(`${job.id}:${stageName}`)) return [202, publicJob(job)];
+            job.stages[stageName].prompt = typeof input.prompt === "string" ? input.prompt.trim().slice(0, 1200) || null : null;
+            job.stages[stageName].status = "queued";
+            job.stages[stageName].decision = null;
+            await saveJob(job);
+            void generate(job, stageName);
+            return [202, publicJob(job)];
+          }
+          if (job.stages[stageName].decision === (decision === "approve" ? "approved" : "rejected")) return [200, publicJob(job)];
+          if (!DECISIONS.has(decision) || job.stages[stageName].status !== "review") throw Object.assign(new Error("Stage is not ready for review"), { status: 409 });
+          const previousStatus = job.stages[stageName].status;
+          const previousDecision = job.stages[stageName].decision;
+          const previousJobStatus = job.status;
+          job.stages[stageName].decision = decision === "approve" ? "approved" : "rejected";
+          job.stages[stageName].status = job.stages[stageName].decision;
+          job.stages[stageName].error = null;
+          job.stages[stageName].updatedAt = new Date().toISOString();
+          const startGarment = stageName === "crop" && decision === "approve" && job.stages.garment.status === "pending";
+          await saveJob(job);
+          if (decision === "approve" && stageName !== "crop") {
+            try {
+              await persistImported(job, stageName === "modeled");
+              // Imports finish at the cutout. Marked complete only after the copy, because listing jobs deletes complete ones.
+              job.status = "complete";
+              await saveJob(job);
+            } catch (error) {
+              job.stages[stageName].status = previousStatus;
+              job.stages[stageName].decision = previousDecision;
+              job.status = previousJobStatus;
+              await saveJob(job);
+              throw error;
+            }
+          }
+          if (decision === "reject") await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
+          if (startGarment) void generate(job, "garment");
+          const response = publicJob(job);
+          if (job.status === "complete") await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
+          return [200, response];
+        }
+        return [404, { error: "Not found" }];
+      });
+      return json(res, statusCode, value);
     } catch (error) {
       const statusCode = error.code === "ENOENT" ? 404 : error.status || 500;
       return json(res, statusCode, { error: statusCode === 500 ? "Internal server error" : error.message, ...(process.env.NODE_ENV === "development" && statusCode === 500 ? { detail: error.message } : {}) });
@@ -1172,6 +1299,8 @@ export function wardrobeImportApi(options = {}) {
       importedFile = path.join(dataDir, "library.json");
       plansFile = path.join(dataDir, "plans.json");
       settingsFile = path.join(dataDir, "settings.json");
+      detectionsDir = path.join(dataDir, "detections");
+      await mkdir(detectionsDir, { recursive: true });
       outfitDir = path.join(dataDir, "outfit-images");
       // Back cutouts cannot survive a restart either.
       const library = await loadImported().catch(() => []);
@@ -1186,6 +1315,11 @@ export function wardrobeImportApi(options = {}) {
       libraryAssetDir = path.join(dataDir, "imported");
       await mkdir(jobsDir, { recursive: true });
       await mkdir(libraryAssetDir, { recursive: true });
+      // Photos that were still being searched when the server stopped.
+      for (const name of await readdir(detectionsDir).catch(() => [])) {
+        const match = name.match(/^([\w-]{1,64})\.png$/);
+        if (match) runDetection(match[1], path.join(detectionsDir, name), await readFile(path.join(detectionsDir, name)));
+      }
       const ids = await readdir(jobsDir).catch(() => []);
       for (const id of ids) {
         const job = await loadJob(id);
@@ -1219,7 +1353,12 @@ export function wardrobeImportApi(options = {}) {
         }
       }
     },
-    configureServer(server) { server.middlewares.use(handler); },
+    configureServer(server) {
+      // Longer than iOS keeps idle connections, so the server never closes one the phone is about to reuse
+      // (that race shows up in the app as "The network connection was lost").
+      if (server.httpServer) Object.assign(server.httpServer, { keepAliveTimeout: 120 * 1000, headersTimeout: 125 * 1000 });
+      server.middlewares.use(handler);
+    },
     configurePreviewServer(server) { server.middlewares.use(handler); },
   };
 }

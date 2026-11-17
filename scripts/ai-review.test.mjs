@@ -43,3 +43,9 @@ test("parseChangelog reads versions, dates and notes newest first", async () => 
   const entries = parseChangelog("# Changelog\n\nIntro\n\n## 1.1.0 — 2026-11-17\n- Two\n- Three\n\n## 1.0.0\n- One\n");
   assert.deepEqual(entries, [{ version: "1.1.0", date: "2026-11-17", notes: ["Two", "Three"] }, { version: "1.0.0", date: null, notes: ["One"] }]);
 });
+
+test("untilApproved stops at once when an attempt is cancelled", async () => {
+  let calls = 0;
+  await assert.rejects(untilApproved({ attempts: 3, make: async () => { calls += 1; throw Object.assign(new Error("Discarded"), { cancelled: true }); }, check: async () => [] }), /Discarded/);
+  assert.equal(calls, 1);
+});

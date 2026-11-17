@@ -12,7 +12,8 @@ export async function untilApproved({ attempts, make, check, onRetry = () => {} 
       if (!kept.problems.length) return kept;
       feedback = kept.problems;
     } catch (error) {
-      if (attempt === attempts && !kept) throw error;
+      // The work is no longer wanted (e.g. its job was discarded); another attempt would only spend AI usage.
+      if (error.cancelled || (attempt === attempts && !kept)) throw error;
       feedback = [error.message];
     }
     if (attempt < attempts) onRetry(feedback, attempt + 1);
