@@ -116,6 +116,7 @@ private struct ClosetCell: View {
     var body: some View {
         Button(action: open) {
             GarmentImage(item: item)
+                .garmentLift()
                 .padding(8)
                 .aspectRatio(1, contentMode: .fit)
                 .saturation(item.isAvailable ? 1 : 0)

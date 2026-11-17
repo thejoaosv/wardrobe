@@ -1,7 +1,7 @@
 import PhotosUI
 import SwiftUI
 
-/// Bottom sheet for one piece: its photos up top, then the essentials, the stylist's details, and photo tools.
+/// Bottom sheet for one piece: the cutout on the canvas, its name and quick toggles, then grouped panels.
 struct ItemSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -30,98 +30,109 @@ struct ItemSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    photos.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-                }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 30) {
+                    photos
 
-                Section {
-                    TextField("Name", text: $draft.name, axis: .vertical)
-                        .font(.display(26))
-                        .submitLabel(.done)
-                    Picker("Category", selection: $draft.part) {
-                        ForEach(Parts.order, id: \.self) { Text(Parts.label($0)).tag($0) }
+                    VStack(alignment: .leading, spacing: 14) {
+                        TextField("Name", text: $draft.name, axis: .vertical)
+                            .font(.display(30))
+                            .submitLabel(.done)
+                        HStack(spacing: 8) {
+                            Menu {
+                                Picker("Category", selection: $draft.part) {
+                                    ForEach(Parts.order, id: \.self) { Text(Parts.label($0)).tag($0) }
+                                }
+                            } label: {
+                                MenuChipLabel(title: Parts.label(draft.part))
+                            }
+                            ChoiceChip(title: "In the wash", symbol: "washer", selected: !live.isAvailable) {
+                                Task { await store.setUnavailable([live.id], live.isAvailable) }
+                            }
+                            .sensoryFeedback(.selection, trigger: live.isAvailable)
+                            .accessibilityHint("Toggles whether it's in the wash")
+                        }
                     }
-                    Toggle(isOn: Binding(get: { !live.isAvailable }, set: { washing in Task { await store.setUnavailable([live.id], washing) } })) {
-                        Label("In the wash", systemImage: "washer")
-                    }
-                    .sensoryFeedback(.selection, trigger: live.isAvailable)
-                }
 
-                Section {
-                    labeled("Description") {
-                        TextField("Fabric, fit, warmth, how dressy it is", text: optional(\.description), axis: .vertical)
-                            .lineLimit(2...6)
+                    Panel(title: "For the stylist", footer: "Outfits and cutouts use these. Write text exactly as printed, e.g. front: large \"ROTATION\", small \"LX\" below.") {
+                        field("Description") {
+                            TextField("Fabric, fit, warmth, how dressy it is", text: optional(\.description), axis: .vertical)
+                                .lineLimit(2...6)
+                        }
+                        field("Text on it") {
+                            TextField("None", text: optional(\.text), axis: .vertical)
+                                .lineLimit(1...3)
+                        }
                     }
-                    labeled("Text on it") {
-                        TextField("None", text: optional(\.text), axis: .vertical)
-                            .lineLimit(1...3)
-                    }
-                } header: {
-                    Text("For the stylist")
-                } footer: {
-                    Text("Outfits and cutouts use these. Write text exactly as printed, e.g. front: large \"ROTATION\", small \"LX\" below.")
-                }
 
-                Section("Look") {
-                    ColorPicker("Main color", selection: colorBinding(\.color), supportsOpacity: false)
-                    if draft.secondaryColor != nil {
-                        ColorPicker(selection: colorBinding(\.secondaryColor), supportsOpacity: false) {
-                            HStack {
-                                Text("Second color")
-                                Button("Remove second color", systemImage: "minus.circle.fill") { draft.secondaryColor = nil }
-                                    .labelStyle(.iconOnly).foregroundStyle(Theme.muted).buttonStyle(.plain)
+                    Panel(title: "Look") {
+                        PanelRow(title: "Main color") {
+                            ColorPicker("Main color", selection: colorBinding(\.color), supportsOpacity: false).labelsHidden()
+                        }
+                        PanelRow(title: "Second color") {
+                            if draft.secondaryColor != nil {
+                                HStack(spacing: 12) {
+                                    Button("Remove second color", systemImage: "xmark.circle.fill") { withAnimation(Theme.spring) { draft.secondaryColor = nil } }
+                                        .labelStyle(.iconOnly).foregroundStyle(Theme.muted).buttonStyle(.plain)
+                                    ColorPicker("Second color", selection: colorBinding(\.secondaryColor), supportsOpacity: false).labelsHidden()
+                                }
+                            } else {
+                                Button("Add") { withAnimation(Theme.spring) { draft.secondaryColor = "#8a847a" } }
+                                    .font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
                             }
                         }
-                    } else {
-                        Button("Add a second color", systemImage: "plus") { draft.secondaryColor = "#8a847a" }
+                        field("Details") { tags }
                     }
-                    labeled("Details") { tags }
-                }
 
-                Section {
-                    Stepper(value: Binding(get: { draft.wearLimit }, set: { draft.wears = $0 }), in: 1...10) {
-                        LabeledContent("Wears before washing") {
-                            Text(draft.wearLimit == 1 ? "Once" : "\(draft.wearLimit)×").monospacedDigit().contentTransition(.numericText())
+                    Panel(title: "Laundry", footer: draft.wears == nil
+                          ? "Uses the default for \(Parts.label(draft.part).lowercased()), set in Settings. Outfits can repeat it on nearby days up to this many times."
+                          : "Outfits can repeat it on nearby days up to this many times.") {
+                        PanelRow(title: "Wears before washing", detail: draft.wears == nil ? "Default" : nil) {
+                            CountStepper(value: Binding(get: { draft.wears ?? store.defaultWears(draft.part) }, set: { draft.wears = $0 }))
+                        }
+                        if draft.wears != nil {
+                            Button { withAnimation(Theme.spring) { draft.wears = nil } } label: {
+                                PanelRow(title: "Use the default (\(store.defaultWears(draft.part))×)", symbol: "arrow.uturn.backward")
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
-                } footer: {
-                    Text("Outfits can repeat it on nearby days up to this many times.")
-                }
 
-                Section {
-                    Menu {
-                        Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .front) } }
-                        photoSources(.front)
-                    } label: {
-                        Label("Redo cutout", systemImage: "wand.and.sparkles")
-                    }
-                    .disabled(frontStatus == "processing")
-                    Menu {
-                        photoSources(.back)
-                        if live.backImage != nil {
-                            Button("Remove back", systemImage: "trash", role: .destructive) { Task { await store.removeBack(live) } }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Panel(title: "Photos") {
+                            Menu {
+                                Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .front) } }
+                                photoSources(.front)
+                            } label: {
+                                PanelRow(title: "Redo cutout", symbol: "wand.and.sparkles", detail: "Pressed and checked again") { RowValue() }
+                            }
+                            .disabled(frontStatus == "processing")
+                            Menu {
+                                if live.backImage != nil {
+                                    Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .back) } }
+                                }
+                                photoSources(.back)
+                                if live.backImage != nil {
+                                    Button("Remove back", systemImage: "trash", role: .destructive) { Task { await store.removeBack(live) } }
+                                }
+                            } label: {
+                                PanelRow(title: live.backImage == nil ? "Add the back" : "Back", symbol: "arrow.uturn.backward.square",
+                                         detail: live.backImage == nil ? "Try-ons can then show it" : "Redo, replace or remove") { RowValue() }
+                            }
+                            .disabled(backStatus == "processing")
                         }
-                    } label: {
-                        Label(live.backImage == nil ? "Add a back photo" : "Replace back photo", systemImage: "arrow.uturn.backward.square")
+                        photoNote.font(.footnote).padding(.horizontal, 4)
                     }
-                    .disabled(backStatus == "processing")
-                } header: {
-                    Text("Photos")
-                } footer: {
-                    photoFooter
-                }
 
-                Section {
                     Button("Remove piece", role: .destructive) { confirmingRemove = true }
-                        .frame(maxWidth: .infinity)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
+                .padding(24)
             }
-            .scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.canvas.ignoresSafeArea())
-            .navigationTitle(Parts.label(draft.part))
-            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done", systemImage: "checkmark") { dismiss() }
@@ -161,16 +172,14 @@ struct ItemSheet: View {
         }
     }
 
-    /// Errors and the reviewer's leftover notes for the cutouts, or a hint when all is well.
-    @ViewBuilder private var photoFooter: some View {
+    /// Errors and the reviewer's leftover notes for the cutouts.
+    @ViewBuilder private var photoNote: some View {
         if frontStatus == "failed" {
             Text("Cutout: \(live.front?.error ?? "That didn't work.")").foregroundStyle(.red)
         } else if backStatus == "failed" {
             Text("Back: \(live.back?.error ?? "That didn't work.")").foregroundStyle(.red)
         } else if !warnings.isEmpty {
             ReviewerNote(warnings: warnings)
-        } else {
-            Text("Redo the cutout if its text or details came out wrong. A back photo lets try-ons show the back.")
         }
     }
 
@@ -185,29 +194,40 @@ struct ItemSheet: View {
         }
     }
 
-    /// Front and back in a pager; a side being made shows its skeleton and the AI's status.
+    /// Front and back in a pager, straight on the canvas; a side being made shows its skeleton and the AI's status.
     private var photos: some View {
         TabView {
-            if frontStatus == "processing" {
-                working("Redoing the cutout…")
-            } else {
-                GarmentImage(item: live).padding(24)
-            }
-            if backStatus == "processing" {
-                working("Cutting out the back…")
-            } else if let back = live.backImage {
-                AsyncImage(url: store.url(back), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
-                    if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
+            Group {
+                if frontStatus == "processing" {
+                    working("Redoing the cutout…")
+                } else {
+                    GarmentImage(item: live).garmentLift()
                 }
-                .padding(24)
-                .accessibilityLabel("Back of \(live.name)")
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 36)
+            if backStatus == "processing" || live.backImage != nil {
+                Group {
+                    if backStatus == "processing" {
+                        working(live.backImage == nil ? "Cutting out the back…" : "Redoing the back…")
+                    } else {
+                        AsyncImage(url: store.url(live.backImage), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                            if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
+                        }
+                        .garmentLift()
+                        .accessibilityLabel("Back of \(live.name)")
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 36)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: live.backImage != nil || backStatus == "processing" ? .automatic : .never))
-        .indexViewStyle(.page(backgroundDisplayMode: .interactive))
-        .frame(height: 300)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .indexViewStyle(.page(backgroundDisplayMode: .never))
+        .frame(height: 340)
+        .padding(.horizontal, -24)
         .saturation(live.isAvailable ? 1 : 0)
+        .opacity(live.isAvailable ? 1 : 0.6)
         .animation(Theme.spring, value: live.isAvailable)
     }
 
@@ -236,7 +256,6 @@ struct ItemSheet: View {
                 .submitLabel(.done)
                 .onSubmit(addTag)
         }
-        .padding(.vertical, 2)
     }
 
     @ViewBuilder private func photoSources(_ side: Side) -> some View {
@@ -255,35 +274,37 @@ struct ItemSheet: View {
         }
     }
 
-    /// nil redoes the front from the photo kept at import.
+    /// nil redoes that side from the photo it already has.
     private func use(_ jpeg: Data?, for side: Side) async {
         switch side {
         case .front:
             await save()
             await store.redoCutout(live, jpeg: jpeg)
         case .back:
-            guard let jpeg else { return }
             await store.addBack(live, jpeg: jpeg)
         }
     }
 
     private func working(_ title: String) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             GarmentSkeleton(kind: GarmentKind(part: live.part, name: live.name, tags: live.tags ?? []))
-                .frame(height: 170)
+                .frame(height: 190)
             Text(title).eyebrow()
             if let status {
-                Text(status).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3).padding(.horizontal, 24)
+                Text(status).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3)
             }
         }
     }
 
-    private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    /// A panel row with its label above the control, for text that needs the full width.
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.footnote).foregroundStyle(Theme.muted)
             content()
         }
-        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
     }
 
     private func optional(_ key: WritableKeyPath<Item, String?>) -> Binding<String> {

@@ -289,7 +289,7 @@ private struct GarmentPiece: View {
 
     var body: some View {
         GarmentImage(item: item)
-            .shadow(color: .black.opacity(0.12), radius: 14, y: 10)
+            .garmentLift()
             .saturation(item.isAvailable ? 1 : 0)
             .opacity(shown ? (item.isAvailable ? 1 : 0.45) : 0)
             .offset(y: shown || reduceMotion ? 0 : 28)

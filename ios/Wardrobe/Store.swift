@@ -24,7 +24,6 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var wears: Int?
 
     var isAvailable: Bool { unavailable != true }
-    var wearLimit: Int { wears ?? Parts.defaultWears[part] ?? 1 }
 
     /// warnings are what the AI reviewer still saw wrong after its retries.
     struct Cutout: Codable, Hashable { var status: String; var error: String?; var warnings: [String]? }
@@ -80,13 +79,17 @@ nonisolated struct ServerVersion: Codable {
 }
 
 /// Choices stored on the Mac, shared by every device.
-nonisolated struct ServerSettings: Codable { var checks: String }
+nonisolated struct ServerSettings: Codable {
+    var checks: String
+    /// Wears before washing by category; nil from servers before 1.3.
+    var wears: [String: Int]?
+}
 
 struct PlanDay: Hashable { var date: Date; var style: String; var weather = "auto"; var replace: String? = nil }
 
 nonisolated enum Parts {
     static let order = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"]
-    /// Mirrors DEFAULT_WEARS in scripts/outfit-planner.mjs.
+    /// Mirrors DEFAULT_WEARS in scripts/outfit-planner.mjs, for servers that don't send their own.
     static let defaultWears = ["upperbody": 1, "midlayer": 3, "lowerbody": 3, "wholebody_up": 5, "shoes": 7, "accessories_up": 7]
     static func label(_ part: String) -> String {
         ["upperbody": "Tops", "midlayer": "Sweaters & hoodies", "wholebody_up": "Jackets", "lowerbody": "Bottoms", "shoes": "Shoes", "accessories_up": "Accessories"][part] ?? part
@@ -125,7 +128,7 @@ final class Store {
     /// Changes when the photo of the user is replaced, so its preview reloads.
     var referenceStamp = Date.now
     /// The oldest server API this app works with; see API_VERSION in scripts/import-job-api.mjs.
-    static let minimumServerAPI = 3
+    static let minimumServerAPI = 4
     var serverIsOutdated: Bool { config != nil && (version?.api ?? 0) < Self.minimumServerAPI }
     var error: String?
     /// Why the last refresh could not reach the server, shown in the Server sheet.
@@ -204,6 +207,20 @@ final class Store {
         }
     }
 
+    /// Wears before washing: the piece's own count, else the user's default for its category.
+    func wearLimit(_ item: Item) -> Int {
+        item.wears ?? defaultWears(item.part)
+    }
+
+    func defaultWears(_ part: String) -> Int {
+        settings?.wears?[part] ?? Parts.defaultWears[part] ?? 1
+    }
+
+    func setDefaultWears(_ part: String, _ wears: Int) async {
+        settings?.wears?[part] = wears
+        await run { settings = try await send("/api/import/settings", method: "PATCH", body: ["wears": [part: wears]]) }
+    }
+
     func setChecks(_ checks: String) async {
         await run { settings = try await send("/api/import/settings", method: "PATCH", body: ["checks": checks]) }
     }
@@ -235,10 +252,12 @@ final class Store {
         }
     }
 
-    func addBack(_ item: Item, jpeg: Data) async {
+    /// nil redoes the back from the photo it already has.
+    func addBack(_ item: Item, jpeg: Data?) async {
         await Notifier.requestPermission()
         await run {
-            let saved: Item = try await send("/api/import/wardrobe/\(item.id)/back", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())"])
+            let body: [String: Any] = jpeg.map { ["imageDataUrl": "data:image/jpeg;base64,\($0.base64EncodedString())"] } ?? [:]
+            let saved: Item = try await send("/api/import/wardrobe/\(item.id)/back", method: "POST", body: body)
             if let index = items.firstIndex(where: { $0.id == saved.id }) { items[index] = saved }
         }
     }

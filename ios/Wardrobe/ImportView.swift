@@ -117,7 +117,7 @@ private struct Tips: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             CyclingGarmentSkeleton()
-                .frame(height: 170)
+                .frame(width: 200, height: 160)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
             tip("tshirt", "One piece or a whole outfit", "Lay it flat, hang it, or wear it. Every piece in the photo is found.")
