@@ -1,0 +1,263 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		01EE64691670A525D57176A2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E0E9A0218F5F1A478E179A2C /* Assets.xcassets */; };
+		0DA463A0A15F6C6CCB56B4C2 /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93FCCA6098735296E0A4430E /* Store.swift */; };
+		2B1C303A013974C4561B45A2 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE5DDC8A9D086B17F25385E5 /* Notifier.swift */; };
+		60878F55F4553A65C338A060 /* WardrobeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 084A6071700D2FAB7E223541 /* WardrobeApp.swift */; };
+		6A22BF56F17043286CFF813E /* PlanSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 029F303C4750AA981477CCB4 /* PlanSheet.swift */; };
+		8ADE4B1811A436ACA7B5809B /* ImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04902185595E4887786F863D /* ImportView.swift */; };
+		9F6EBD6F4E3C660F28A1ED7E /* ClosetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEB59E1F460F3544B425A920 /* ClosetView.swift */; };
+		A20F6D774C030DE356784A99 /* ItemSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C0FDC0D3907E728A5F2CE8 /* ItemSheet.swift */; };
+		ADAB7F54C55064058A29909A /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC6B1412E04E581BEB618E05 /* Theme.swift */; };
+		D0849288E668AF2545F52487 /* OutfitsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AB04044E8BC4E5A9D3049D7 /* OutfitsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		029F303C4750AA981477CCB4 /* PlanSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanSheet.swift; sourceTree = "<group>"; };
+		04902185595E4887786F863D /* ImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportView.swift; sourceTree = "<group>"; };
+		084A6071700D2FAB7E223541 /* WardrobeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeApp.swift; sourceTree = "<group>"; };
+		3AB04044E8BC4E5A9D3049D7 /* OutfitsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutfitsView.swift; sourceTree = "<group>"; };
+		6066D187937D9F68A8835450 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9216D41C7EF0F36D0C6F6554 /* Wardrobe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Wardrobe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		93FCCA6098735296E0A4430E /* Store.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Store.swift; sourceTree = "<group>"; };
+		95C0FDC0D3907E728A5F2CE8 /* ItemSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemSheet.swift; sourceTree = "<group>"; };
+		BEB59E1F460F3544B425A920 /* ClosetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClosetView.swift; sourceTree = "<group>"; };
+		CE5DDC8A9D086B17F25385E5 /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
+		E0E9A0218F5F1A478E179A2C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EC6B1412E04E581BEB618E05 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0B1511A03B2D5C8C7FE8B363 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9216D41C7EF0F36D0C6F6554 /* Wardrobe.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C749B7738CAAB1481C054B9E = {
+			isa = PBXGroup;
+			children = (
+				F47EF8C09C4B6E5F28878FC1 /* Wardrobe */,
+				0B1511A03B2D5C8C7FE8B363 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		F47EF8C09C4B6E5F28878FC1 /* Wardrobe */ = {
+			isa = PBXGroup;
+			children = (
+				E0E9A0218F5F1A478E179A2C /* Assets.xcassets */,
+				BEB59E1F460F3544B425A920 /* ClosetView.swift */,
+				04902185595E4887786F863D /* ImportView.swift */,
+				6066D187937D9F68A8835450 /* Info.plist */,
+				95C0FDC0D3907E728A5F2CE8 /* ItemSheet.swift */,
+				CE5DDC8A9D086B17F25385E5 /* Notifier.swift */,
+				3AB04044E8BC4E5A9D3049D7 /* OutfitsView.swift */,
+				029F303C4750AA981477CCB4 /* PlanSheet.swift */,
+				93FCCA6098735296E0A4430E /* Store.swift */,
+				EC6B1412E04E581BEB618E05 /* Theme.swift */,
+				084A6071700D2FAB7E223541 /* WardrobeApp.swift */,
+			);
+			path = Wardrobe;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		6EB6579C204B28CA83D59F65 /* Wardrobe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B078A7087F68F3CC9F37D445 /* Build configuration list for PBXNativeTarget "Wardrobe" */;
+			buildPhases = (
+				0A950FA19ED778BC6272D60F /* Sources */,
+				C5B6BF21E0A5AA27E314DBD4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Wardrobe;
+			packageProductDependencies = (
+			);
+			productName = Wardrobe;
+			productReference = 9216D41C7EF0F36D0C6F6554 /* Wardrobe.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B803FD03FD20BB911E73D276 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					6EB6579C204B28CA83D59F65 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 154414E0F975CEC67CAF2792 /* Build configuration list for PBXProject "Wardrobe" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = C749B7738CAAB1481C054B9E;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0B1511A03B2D5C8C7FE8B363 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				6EB6579C204B28CA83D59F65 /* Wardrobe */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C5B6BF21E0A5AA27E314DBD4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01EE64691670A525D57176A2 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0A950FA19ED778BC6272D60F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9F6EBD6F4E3C660F28A1ED7E /* ClosetView.swift in Sources */,
+				8ADE4B1811A436ACA7B5809B /* ImportView.swift in Sources */,
+				A20F6D774C030DE356784A99 /* ItemSheet.swift in Sources */,
+				2B1C303A013974C4561B45A2 /* Notifier.swift in Sources */,
+				D0849288E668AF2545F52487 /* OutfitsView.swift in Sources */,
+				6A22BF56F17043286CFF813E /* PlanSheet.swift in Sources */,
+				0DA463A0A15F6C6CCB56B4C2 /* Store.swift in Sources */,
+				ADAB7F54C55064058A29909A /* Theme.swift in Sources */,
+				60878F55F4553A65C338A060 /* WardrobeApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0064C70F1641E29E0EC5B17F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		42D05E7260D9A2F8322AC843 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				ENABLE_TESTABILITY = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		4FEB6B6DD6A8155A9A0D984E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CURRENT_PROJECT_VERSION = 2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Wardrobe/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Valet;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Valet connects to the Wardrobe server running on your Mac.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.wardrobe.app;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		75CD0394F700BAB56EAD2FD0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CURRENT_PROJECT_VERSION = 2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Wardrobe/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Valet;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Valet connects to the Wardrobe server running on your Mac.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.wardrobe.app;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		154414E0F975CEC67CAF2792 /* Build configuration list for PBXProject "Wardrobe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				42D05E7260D9A2F8322AC843 /* Debug */,
+				0064C70F1641E29E0EC5B17F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B078A7087F68F3CC9F37D445 /* Build configuration list for PBXNativeTarget "Wardrobe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4FEB6B6DD6A8155A9A0D984E /* Debug */,
+				75CD0394F700BAB56EAD2FD0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B803FD03FD20BB911E73D276 /* Project object */;
+}

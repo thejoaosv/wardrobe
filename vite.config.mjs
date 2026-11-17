@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: "0.0.0.0",
-      allowedHosts: ["terminal.local"],
+      // ".local" lets the iOS app reach this Mac by its Bonjour name, e.g. my-mac.local.
+      allowedHosts: [".local"],
       warmup: {
         clientFiles: ["./src/main.jsx"],
       },
