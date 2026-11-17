@@ -4,6 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback } from "./ai-review.mjs";
 import { createAIProvider } from "./openai-provider.mjs";
+import { parseChangelog } from "./changelog.mjs";
 import { DATE, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
@@ -13,6 +14,10 @@ const STAGES = new Set(["crop", "garment", "modeled"]);
 const DECISIONS = new Set(["approve", "reject"]);
 const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+// Bumped when the app needs endpoints or fields an older server lacks; the app compares it with its minimum.
+export const API_VERSION = 3;
+const SETTINGS = { checks: new Set(["thorough", "fast"]) };
+const DEFAULT_SETTINGS = { checks: "thorough" };
 // Generations tried before the best one goes to the user with the reviewer's remaining notes.
 const CUTOUT_ATTEMPTS = 3;
 const TRY_ON_ATTEMPTS = 2;
@@ -376,8 +381,8 @@ async function analyzeClothes(ai, image, feedback = []) {
 }
 
 // Detects pieces, has a reviewer drop the ones the user isn't adding, and runs detection again when crops or labels are off.
-async function detectClothes(ai, photo, report) {
-  const { result } = await untilApproved({
+async function detectClothes(ai, photo, report, run = untilApproved) {
+  const { result } = await run({
     attempts: DETECT_ATTEMPTS,
     make: async (feedback) => {
       if (!feedback.length) report("Finding clothes…");
@@ -410,6 +415,40 @@ export function wardrobeImportApi(options = {}) {
   const say = (key, message) => { if (key) (message ? progress.set(key, message) : progress.delete(key)); };
   const retrying = (key, total) => (problems, attempt) => say(key, `Retrying (${attempt}/${total}): ${problems[0]}`);
   const libraryFile = (url) => path.join(libraryAssetDir, path.basename(url));
+  let settingsFile;
+
+  async function loadSettings() {
+    try { return { ...DEFAULT_SETTINGS, ...JSON.parse(await readFile(settingsFile, "utf8")) }; }
+    catch (error) { if (error.code === "ENOENT") return { ...DEFAULT_SETTINGS }; throw error; }
+  }
+
+  // Unknown keys and values are ignored, so an older app can't write anything the server doesn't understand.
+  async function saveSettings(input) {
+    return serial(async () => {
+      const next = await loadSettings();
+      for (const [key, allowed] of Object.entries(SETTINGS)) if (allowed.has(input?.[key])) next[key] = input[key];
+      await atomicJson(settingsFile, next);
+      return next;
+    });
+  }
+
+  // The Fast setting skips the AI reviewer and its retries for image work and detection.
+  const reviewed = async (options) => ((await loadSettings()).checks === "fast" ? untilApproved({ ...options, attempts: 1, check: () => [] }) : untilApproved(options));
+
+  async function versionInfo() {
+    const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+    const changelog = parseChangelog(await readFile(path.join(root, "CHANGELOG.md"), "utf8").catch(() => ""));
+    return { version: pkg.version, api: API_VERSION, changelog };
+  }
+
+  // The photo of the user that try-ons dress, uploaded from the phone instead of copied onto the Mac.
+  async function saveModelReference(input) {
+    const photo = await sharp(decodeImage(input).data).rotate().resize(2048, 2048, { fit: "inside", withoutEnlargement: true }).toColorspace("srgb").png().toBuffer();
+    const file = path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png"));
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, photo);
+    return setupStatus();
+  }
   let writeQueue = Promise.resolve();
   // Serializes read-modify-write cycles on library.json and plans.json.
   const serial = (task) => (writeQueue = writeQueue.then(task, task));
@@ -585,7 +624,7 @@ export function wardrobeImportApi(options = {}) {
         const images = side === "back"
           ? [{ data: photo, role: "the user's photo of the back of the garment; reproduce this exact back" }, { data: front, role: "the existing front cutout of the same garment, for consistency only" }]
           : [{ data: photo, role: fromCutout ? "the current cutout of the garment to recreate" : "the user's photo of the garment; reproduce this exact garment" }];
-        const { result, problems } = await untilApproved({
+        const { result, problems } = await reviewed({
           attempts: CUTOUT_ATTEMPTS,
           make: async (feedback) => cleanCutout(await ai.editImage({ size: "1024x1024", quality: setting("OPENAI_IMAGE_QUALITY", "high"), transparent, prompt: withFeedback(prompt, feedback), images }), chromaKey),
           check: (cutout) => { say(key, "Checking the cutout…"); return reviewCutout(ai, { photo, cutout, metadata, side, referenceIsCutout: fromCutout }); },
@@ -672,7 +711,7 @@ export function wardrobeImportApi(options = {}) {
           }
           const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
           const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: item.text, image: await readFile(libraryFile(item.image)) })));
-          const { result: bytes, problems } = await untilApproved({
+          const { result: bytes, problems } = await reviewed({
             attempts: TRY_ON_ATTEMPTS,
             make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments), feedback) }),
             check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: reference, image, garments: worn }); },
@@ -789,7 +828,7 @@ export function wardrobeImportApi(options = {}) {
           if (fullPhoto) images.push({ data: fullPhoto, role: "the full selected photo, for context only" });
           const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
           const prompt = current.stages.garment.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.garment.prompt}` : basePrompt;
-          ({ result: bytes, problems: warnings } = await untilApproved({
+          ({ result: bytes, problems: warnings } = await reviewed({
             attempts: CUTOUT_ATTEMPTS,
             make: async (feedback, attempt) => {
               const raw = await ai.editImage({ model: setting("OPENAI_GARMENT_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1024x1024", transparent, images: inputs, prompt: withFeedback(prompt, feedback) });
@@ -822,7 +861,7 @@ export function wardrobeImportApi(options = {}) {
             { data: selected, role: "the selected original photo of the garment, for fidelity context only" },
           ].map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
           const prompt = current.stages.modeled.prompt ? `${basePrompt}\nUser regeneration direction: ${current.stages.modeled.prompt}` : basePrompt;
-          ({ result: bytes, problems: warnings } = await untilApproved({
+          ({ result: bytes, problems: warnings } = await reviewed({
             attempts: TRY_ON_ATTEMPTS,
             make: (feedback) => ai.editImage({ model: setting("OPENAI_MODELED_MODEL"), quality: setting("OPENAI_IMAGE_QUALITY", "high"), size: "1536x1024", images: inputs, prompt: withFeedback(prompt, feedback) }),
             check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: modelData, image, garments: [{ name: current.metadata.name, text: current.metadata.text, image: garment.data }] }); },
@@ -863,6 +902,23 @@ export function wardrobeImportApi(options = {}) {
       }
       if (url.pathname === "/api/import/config" && req.method === "GET") {
         return json(res, 200, await setupStatus());
+      }
+      if (url.pathname === "/api/import/version" && req.method === "GET") {
+        return json(res, 200, await versionInfo());
+      }
+      if (url.pathname === "/api/import/settings" && req.method === "GET") {
+        return json(res, 200, await loadSettings());
+      }
+      if (url.pathname === "/api/import/settings" && req.method === "PATCH") {
+        return json(res, 200, await saveSettings(await body(req)));
+      }
+      if (url.pathname === "/api/import/model-reference" && req.method === "POST") {
+        return json(res, 200, await saveModelReference(await body(req)));
+      }
+      if (url.pathname === "/api/import/model-reference" && req.method === "GET") {
+        res.setHeader("Content-Type", "image/png");
+        res.setHeader("Cache-Control", "no-store");
+        return res.end(await readFile(path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png"))));
       }
       const wardrobeDeleteMatch = url.pathname.match(/^\/api\/import\/wardrobe\/(import-[a-f0-9-]{36})$/i);
       if (wardrobeDeleteMatch && req.method === "PATCH") {
@@ -967,7 +1023,7 @@ export function wardrobeImportApi(options = {}) {
         const image = decodeImage(input);
         const normalizedImage = await normalizeImage(image.data);
         const progressKey = typeof input.clientId === "string" && /^[\w-]{1,64}$/.test(input.clientId) ? `detect:${input.clientId}` : null;
-        const detected = await detectClothes(ai, normalizedImage, (message) => say(progressKey, message)).finally(() => say(progressKey, null));
+        const detected = await detectClothes(ai, normalizedImage, (message) => say(progressKey, message), reviewed).finally(() => say(progressKey, null));
         const jobs = [];
         for (const { metadata, crop: croppedImage } of detected) {
           const id = randomUUID();
@@ -1097,6 +1153,7 @@ export function wardrobeImportApi(options = {}) {
       jobsDir = path.join(dataDir, "jobs");
       importedFile = path.join(dataDir, "library.json");
       plansFile = path.join(dataDir, "plans.json");
+      settingsFile = path.join(dataDir, "settings.json");
       outfitDir = path.join(dataDir, "outfit-images");
       // Back cutouts cannot survive a restart either.
       const library = await loadImported().catch(() => []);

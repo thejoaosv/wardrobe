@@ -37,3 +37,9 @@ test("missingWords catches a swapped word but not spacing or case", () => {
   assert.match(withFeedback("Base", ["Fix the text"]), /Base\n\nA reviewer rejected[\s\S]*- Fix the text/);
   assert.equal(withFeedback("Base", []), "Base");
 });
+
+test("parseChangelog reads versions, dates and notes newest first", async () => {
+  const { parseChangelog } = await import("./changelog.mjs");
+  const entries = parseChangelog("# Changelog\n\nIntro\n\n## 1.1.0 — 2026-11-17\n- Two\n- Three\n\n## 1.0.0\n- One\n");
+  assert.deepEqual(entries, [{ version: "1.1.0", date: "2026-11-17", notes: ["Two", "Three"] }, { version: "1.0.0", date: null, notes: ["One"] }]);
+});
