@@ -80,9 +80,14 @@ struct GarmentSkeleton: View {
     var body: some View {
         let shape = GarmentShape(kind: kind)
         ZStack {
-            // A round stroke in the same tone softens the polygon corners.
-            shape.fill(Theme.ink.opacity(0.07))
-            shape.stroke(Theme.ink.opacity(0.07), style: StrokeStyle(lineWidth: 8, lineJoin: .round))
+            // A round stroke softens the polygon corners; composited first so the overlap doesn't show as an outline.
+            ZStack {
+                shape.fill()
+                shape.stroke(style: StrokeStyle(lineWidth: 8, lineJoin: .round))
+            }
+            .foregroundStyle(Theme.ink)
+            .compositingGroup()
+            .opacity(0.07)
             GeometryReader { geometry in
                 LinearGradient(colors: [.clear, Theme.ink.opacity(0.09), .clear], startPoint: .leading, endPoint: .trailing)
                     .frame(width: geometry.size.width * 0.5)
