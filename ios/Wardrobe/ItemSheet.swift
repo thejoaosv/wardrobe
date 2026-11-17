@@ -1,195 +1,127 @@
 import PhotosUI
 import SwiftUI
 
-/// Bottom sheet for one piece: its photos, editable details, and the wash and remove actions.
+/// Bottom sheet for one piece: its photos up top, then the essentials, the stylist's details, and photo tools.
 struct ItemSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var draft: Item
     @State private var newTag = ""
-    @State private var backPick: PhotosPickerItem?
     @State private var frontPick: PhotosPickerItem?
+    @State private var backPick: PhotosPickerItem?
     @State private var picking: Side?
     @State private var shooting: Side?
-
-    enum Side: String, Identifiable { case front, back; var id: String { rawValue } }
     @State private var confirmingRemove = false
     private let original: Item
+
+    enum Side: String, Identifiable { case front, back; var id: String { rawValue } }
 
     init(item: Item) {
         original = item
         _draft = State(initialValue: item)
     }
 
-    /// Live copy for state the server changes (wash, back cutout).
+    /// Live copy for state the server changes (wash, cutouts).
     private var live: Item { store.item(original.id) ?? original }
     private var backStatus: String? { live.back?.status }
     private var frontStatus: String? { live.front?.status }
     private var status: String? { store.progress["cutout:\(original.id)"] }
+    private var warnings: [String] { (live.front?.warnings ?? []) + (live.back?.warnings ?? []) }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    photos
+            Form {
+                Section {
+                    photos.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                }
 
+                Section {
                     TextField("Name", text: $draft.name, axis: .vertical)
-                        .font(.display(30))
+                        .font(.display(26))
                         .submitLabel(.done)
-
-                    field("Category") {
-                        Menu {
-                            Picker("Category", selection: $draft.part) {
-                                ForEach(Parts.order, id: \.self) { Text(Parts.label($0)).tag($0) }
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text(Parts.label(draft.part))
-                                Image(systemName: "chevron.up.chevron.down").font(.caption)
-                            }
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(Theme.ink)
-                            .padding(.horizontal, 16)
-                            .frame(minHeight: 40)
-                            .background(Theme.ink.opacity(0.06), in: Capsule())
-                        }
+                    Picker("Category", selection: $draft.part) {
+                        ForEach(Parts.order, id: \.self) { Text(Parts.label($0)).tag($0) }
                     }
+                    Toggle(isOn: Binding(get: { !live.isAvailable }, set: { washing in Task { await store.setUnavailable([live.id], washing) } })) {
+                        Label("In the wash", systemImage: "washer")
+                    }
+                    .sensoryFeedback(.selection, trigger: live.isAvailable)
+                }
 
-                    field("Description") {
+                Section {
+                    labeled("Description") {
                         TextField("Fabric, fit, warmth, how dressy it is", text: optional(\.description), axis: .vertical)
-                            .font(.body)
                             .lineLimit(2...6)
                     }
-
-                    field("Text on it") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            TextField("None", text: optional(\.text), axis: .vertical)
-                                .font(.body)
-                                .lineLimit(1...3)
-                            Text("Exactly as printed, e.g. front: large \"ROTATION\", small \"LX\" below. Cutouts copy it letter for letter.")
-                                .font(.footnote).foregroundStyle(Theme.muted)
-                        }
+                    labeled("Text on it") {
+                        TextField("None", text: optional(\.text), axis: .vertical)
+                            .lineLimit(1...3)
                     }
-
-                    field("Colors") {
-                        HStack(spacing: 20) {
-                            ColorPicker("Main", selection: colorBinding(\.color), supportsOpacity: false)
-                                .fixedSize()
-                            if draft.secondaryColor != nil {
-                                ColorPicker("Second", selection: colorBinding(\.secondaryColor), supportsOpacity: false)
-                                    .fixedSize()
-                                Button("Remove second color", systemImage: "xmark.circle.fill") { draft.secondaryColor = nil }
-                                    .labelStyle(.iconOnly)
-                                    .foregroundStyle(Theme.muted)
-                            } else {
-                                Button("Add second color", systemImage: "plus") { draft.secondaryColor = "#8a847a" }
-                                    .font(.subheadline.weight(.medium))
-                            }
-                        }
-                        .font(.subheadline)
-                    }
-
-                    field("Details") {
-                        FlowLayout {
-                            ForEach(draft.tags ?? [], id: \.self) { tag in
-                                Button {
-                                    withAnimation(Theme.spring) { draft.tags?.removeAll { $0 == tag } }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Text(tag)
-                                        Image(systemName: "xmark").font(.caption2.weight(.semibold)).foregroundStyle(Theme.muted)
-                                    }
-                                    .font(.subheadline)
-                                    .padding(.horizontal, 14)
-                                    .frame(minHeight: 36)
-                                    .background(Theme.ink.opacity(0.06), in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove \(tag)")
-                            }
-                            TextField("Add detail", text: $newTag)
-                                .font(.subheadline)
-                                .frame(width: 120, height: 36)
-                                .submitLabel(.done)
-                                .onSubmit(addTag)
-                        }
-                    }
-
-                    field("Wears before washing") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Stepper(value: Binding(get: { draft.wearLimit }, set: { draft.wears = $0 }), in: 1...10) {
-                                Text(draft.wearLimit == 1 ? "Once" : "\(draft.wearLimit) times").font(.body.weight(.medium))
-                                    .contentTransition(.numericText())
-                            }
-                            Text("Outfits can repeat it on nearby days up to this many times.")
-                                .font(.footnote).foregroundStyle(Theme.muted)
-                        }
-                    }
-
-                    field("Cutout") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Redo it if the text or details came out wrong. Fix \"Text on it\" first; the new cutout follows it.")
-                                .font(.footnote).foregroundStyle(Theme.muted)
-                            if frontStatus == "failed" {
-                                Text(live.front?.error ?? "That didn't work.").font(.footnote).foregroundStyle(.red).lineLimit(3)
-                            } else if frontStatus == "ready", let warnings = live.front?.warnings, !warnings.isEmpty {
-                                ReviewerNote(warnings: warnings)
-                            }
-                            HStack(spacing: 10) {
-                                Button("Redo cutout", systemImage: "arrow.clockwise") {
-                                    Task {
-                                        await save()
-                                        await store.redoCutout(live)
-                                    }
-                                }
-                                .buttonStyle(QuietButtonStyle())
-                                photoMenu(.front, label: "From a new photo")
-                            }
-                            .disabled(frontStatus == "processing")
-                        }
-                    }
-
-                    field("Back") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Add a photo of the back if it has a print or detail worth seeing. Try-ons will then turn to show it.")
-                                .font(.footnote).foregroundStyle(Theme.muted)
-                            if backStatus == "failed" {
-                                Text(live.back?.error ?? "That didn't work.").font(.footnote).foregroundStyle(.red).lineLimit(3)
-                            } else if backStatus == "ready", let warnings = live.back?.warnings, !warnings.isEmpty {
-                                ReviewerNote(warnings: warnings)
-                            }
-                            HStack(spacing: 10) {
-                                photoMenu(.back, label: live.backImage == nil ? "Add back photo" : "Replace back photo")
-                                    .disabled(backStatus == "processing")
-                                if live.backImage != nil {
-                                    Button("Remove back", systemImage: "trash") { Task { await store.removeBack(live) } }
-                                        .labelStyle(.iconOnly)
-                                        .buttonStyle(QuietButtonStyle())
-                                }
-                            }
-                        }
-                    }
-
-                    VStack(spacing: 10) {
-                        Button {
-                            Task { await store.setUnavailable([live.id], live.isAvailable) }
-                        } label: {
-                            Label(live.isAvailable ? "Put in the wash" : "Back from the wash", systemImage: "washer")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(QuietButtonStyle())
-                        .sensoryFeedback(.selection, trigger: live.isAvailable)
-
-                        Button("Remove piece", role: .destructive) { confirmingRemove = true }
-                            .font(.subheadline.weight(.medium))
-                            .frame(minHeight: 44)
-                            .frame(maxWidth: .infinity)
-                    }
+                } header: {
+                    Text("For the stylist")
+                } footer: {
+                    Text("Outfits and cutouts use these. Write text exactly as printed, e.g. front: large \"ROTATION\", small \"LX\" below.")
                 }
-                .padding(24)
+
+                Section("Look") {
+                    ColorPicker("Main color", selection: colorBinding(\.color), supportsOpacity: false)
+                    if draft.secondaryColor != nil {
+                        ColorPicker(selection: colorBinding(\.secondaryColor), supportsOpacity: false) {
+                            HStack {
+                                Text("Second color")
+                                Button("Remove second color", systemImage: "minus.circle.fill") { draft.secondaryColor = nil }
+                                    .labelStyle(.iconOnly).foregroundStyle(Theme.muted).buttonStyle(.plain)
+                            }
+                        }
+                    } else {
+                        Button("Add a second color", systemImage: "plus") { draft.secondaryColor = "#8a847a" }
+                    }
+                    labeled("Details") { tags }
+                }
+
+                Section {
+                    Stepper(value: Binding(get: { draft.wearLimit }, set: { draft.wears = $0 }), in: 1...10) {
+                        LabeledContent("Wears before washing") {
+                            Text(draft.wearLimit == 1 ? "Once" : "\(draft.wearLimit)×").monospacedDigit().contentTransition(.numericText())
+                        }
+                    }
+                } footer: {
+                    Text("Outfits can repeat it on nearby days up to this many times.")
+                }
+
+                Section {
+                    Menu {
+                        Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .front) } }
+                        photoSources(.front)
+                    } label: {
+                        Label("Redo cutout", systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(frontStatus == "processing")
+                    Menu {
+                        photoSources(.back)
+                        if live.backImage != nil {
+                            Button("Remove back", systemImage: "trash", role: .destructive) { Task { await store.removeBack(live) } }
+                        }
+                    } label: {
+                        Label(live.backImage == nil ? "Add a back photo" : "Replace back photo", systemImage: "arrow.uturn.backward.square")
+                    }
+                    .disabled(backStatus == "processing")
+                } header: {
+                    Text("Photos")
+                } footer: {
+                    photoFooter
+                }
+
+                Section {
+                    Button("Remove piece", role: .destructive) { confirmingRemove = true }
+                        .frame(maxWidth: .infinity)
+                }
             }
+            .scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.canvas.ignoresSafeArea())
+            .navigationTitle(Parts.label(draft.part))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done", systemImage: "checkmark") { dismiss() }
@@ -218,28 +150,27 @@ struct ItemSheet: View {
             }
             .ignoresSafeArea()
         }
-        .onChange(of: frontPick) { _, pick in
-            guard let pick else { return }
-            frontPick = nil
-            Task {
-                guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
-                await use(jpeg, for: .front)
-            }
-        }
-        .onChange(of: backPick) { _, pick in
-            guard let pick else { return }
-            backPick = nil
-            Task {
-                guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
-                await use(jpeg, for: .back)
-            }
-        }
+        .onChange(of: frontPick) { _, pick in load(pick, for: .front) }
+        .onChange(of: backPick) { _, pick in load(pick, for: .back) }
         .task(id: "\(backStatus ?? "")\(frontStatus ?? "")") {
             // Cutouts take about a minute on the Mac.
             while (backStatus == "processing" || frontStatus == "processing") && !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
                 await store.loadItems()
             }
+        }
+    }
+
+    /// Errors and the reviewer's leftover notes for the cutouts, or a hint when all is well.
+    @ViewBuilder private var photoFooter: some View {
+        if frontStatus == "failed" {
+            Text("Cutout: \(live.front?.error ?? "That didn't work.")").foregroundStyle(.red)
+        } else if backStatus == "failed" {
+            Text("Back: \(live.back?.error ?? "That didn't work.")").foregroundStyle(.red)
+        } else if !warnings.isEmpty {
+            ReviewerNote(warnings: warnings)
+        } else {
+            Text("Redo the cutout if its text or details came out wrong. A back photo lets try-ons show the back.")
         }
     }
 
@@ -254,13 +185,13 @@ struct ItemSheet: View {
         }
     }
 
-    /// Front and back side by side in a pager; the back pulses while it's being cut out.
+    /// Front and back in a pager; a side being made shows its skeleton and the AI's status.
     private var photos: some View {
         TabView {
             if frontStatus == "processing" {
                 working("Redoing the cutout…")
             } else {
-                GarmentImage(item: live).padding(20)
+                GarmentImage(item: live).padding(24)
             }
             if backStatus == "processing" {
                 working("Cutting out the back…")
@@ -268,38 +199,70 @@ struct ItemSheet: View {
                 AsyncImage(url: store.url(back), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                     if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
                 }
-                .padding(20)
+                .padding(24)
                 .accessibilityLabel("Back of \(live.name)")
             }
         }
         .tabViewStyle(.page(indexDisplayMode: live.backImage != nil || backStatus == "processing" ? .automatic : .never))
         .indexViewStyle(.page(backgroundDisplayMode: .interactive))
-        .frame(height: 320)
-        .frame(maxWidth: .infinity)
+        .frame(height: 300)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .saturation(live.isAvailable ? 1 : 0)
         .animation(Theme.spring, value: live.isAvailable)
     }
 
-    /// Take a photo or pick one from the library.
-    private func photoMenu(_ side: Side, label: String) -> some View {
-        Menu {
-            if CameraPicker.isAvailable {
-                Button("Take photo", systemImage: "camera") { shooting = side }
+    private var tags: some View {
+        FlowLayout {
+            ForEach(draft.tags ?? [], id: \.self) { tag in
+                Button {
+                    withAnimation(Theme.spring) { draft.tags?.removeAll { $0 == tag } }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(tag)
+                        Image(systemName: "xmark").font(.caption2.weight(.semibold)).foregroundStyle(Theme.muted)
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 32)
+                    .background(Theme.ink.opacity(0.06), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove \(tag)")
             }
-            Button("Choose from library", systemImage: "photo.on.rectangle") { picking = side }
-        } label: {
-            Label(label, systemImage: "camera")
+            TextField("Add detail", text: $newTag)
+                .font(.subheadline)
+                .frame(width: 110, height: 32)
+                .submitLabel(.done)
+                .onSubmit(addTag)
         }
-        .buttonStyle(QuietButtonStyle())
+        .padding(.vertical, 2)
     }
 
-    private func use(_ jpeg: Data, for side: Side) async {
+    @ViewBuilder private func photoSources(_ side: Side) -> some View {
+        if CameraPicker.isAvailable {
+            Button("Take photo", systemImage: "camera") { shooting = side }
+        }
+        Button("Choose photo", systemImage: "photo.on.rectangle") { picking = side }
+    }
+
+    private func load(_ pick: PhotosPickerItem?, for side: Side) {
+        guard let pick else { return }
+        if side == .front { frontPick = nil } else { backPick = nil }
+        Task {
+            guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
+            await use(jpeg, for: side)
+        }
+    }
+
+    /// nil redoes the front from the photo kept at import.
+    private func use(_ jpeg: Data?, for side: Side) async {
         switch side {
         case .front:
             await save()
             await store.redoCutout(live, jpeg: jpeg)
         case .back:
+            guard let jpeg else { return }
             await store.addBack(live, jpeg: jpeg)
         }
     }
@@ -315,11 +278,12 @@ struct ItemSheet: View {
         }
     }
 
-    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).eyebrow()
+    private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.footnote).foregroundStyle(Theme.muted)
             content()
         }
+        .padding(.vertical, 2)
     }
 
     private func optional(_ key: WritableKeyPath<Item, String?>) -> Binding<String> {
