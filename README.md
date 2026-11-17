@@ -37,6 +37,7 @@ Open [localhost:5173](http://localhost:5173).
 - **Closet**: tap a piece to mark it as in the laundry (unavailable) or available again. "Laundry done" returns everything at once.
 - **Import**: take a photo or pick some from your camera roll, then review each crop and cutout. A piece can redo its cutout later from its photo or a new one.
 - **Try on**: ask for a photo of yourself wearing a planned outfit (needs `data/model-reference.png`).
+- **Settings**: your Mac's address and connection, AI quality checks (Thorough or Fast), the photo of you for try-ons, and the app and server versions. The server's changelog ([CHANGELOG.md](CHANGELOG.md)) opens after five taps on its version.
 - **Notifications**: you're told when pieces are ready to review or a try-on is done, even with the app closed.
 
 Planning remembers what you wore or planned on nearby dates. It won't reuse a piece within 4 days unless you have no alternative, it never repeats an outfit combination, and it skips anything in the laundry. Outfits that contain laundry items or nearby repeats are flagged.

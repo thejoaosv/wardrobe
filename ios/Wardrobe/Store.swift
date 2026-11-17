@@ -72,6 +72,16 @@ nonisolated struct ServerConfig: Codable {
     var modelReference: String
 }
 
+nonisolated struct ServerVersion: Codable {
+    struct Release: Codable, Hashable { var version: String; var date: String?; var notes: [String] }
+    var version: String
+    var api: Int
+    var changelog: [Release]
+}
+
+/// Choices stored on the Mac, shared by every device.
+nonisolated struct ServerSettings: Codable { var checks: String }
+
 struct PlanDay: Hashable { var date: Date; var style: String; var weather = "auto"; var replace: String? = nil }
 
 nonisolated enum Parts {
@@ -109,6 +119,14 @@ final class Store {
     var plans: [Plan] = []
     var jobs: [Job] = []
     var config: ServerConfig?
+    /// nil when the server predates versions.
+    var version: ServerVersion?
+    var settings: ServerSettings?
+    /// Changes when the photo of the user is replaced, so its preview reloads.
+    var referenceStamp = Date.now
+    /// The oldest server API this app works with; see API_VERSION in scripts/import-job-api.mjs.
+    static let minimumServerAPI = 3
+    var serverIsOutdated: Bool { config != nil && (version?.api ?? 0) < Self.minimumServerAPI }
     var error: String?
     /// Why the last refresh could not reach the server, shown in the Server sheet.
     var connectionError: String?
@@ -174,12 +192,26 @@ final class Store {
             async let jobs: [Job] = send("/api/import/jobs")
             (self.items, self.plans, self.config, self.jobs) = try await (items, plans, config, jobs)
             connectionError = nil
+            // Older servers lack these; that is what serverIsOutdated reports.
+            version = try? await send("/api/import/version")
+            settings = try? await send("/api/import/settings")
         } catch is CancellationError {
         } catch let error as URLError where error.code == .cancelled {
         } catch {
             print("Wardrobe could not reach \(serverURL): \(error)")
             config = nil
             connectionError = error.localizedDescription
+        }
+    }
+
+    func setChecks(_ checks: String) async {
+        await run { settings = try await send("/api/import/settings", method: "PATCH", body: ["checks": checks]) }
+    }
+
+    func uploadModelReference(_ jpeg: Data) async {
+        await run {
+            config = try await send("/api/import/model-reference", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())"])
+            referenceStamp = .now
         }
     }
 
