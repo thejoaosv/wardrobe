@@ -216,7 +216,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Wardrobe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Valet;
@@ -225,7 +225,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.wardrobe.app;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -235,7 +235,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Wardrobe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Valet;
@@ -244,7 +244,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose photos of clothes to import.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.wardrobe.app;
 				TARGETED_DEVICE_FAMILY = 1;
 			};

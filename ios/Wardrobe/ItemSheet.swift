@@ -59,9 +59,15 @@ struct ItemSheet: View {
                             TextField("Fabric, fit, warmth, how dressy it is", text: optional(\.description), axis: .vertical)
                                 .lineLimit(2...6)
                         }
-                        field("Text on it") {
+                        field(live.backImage == nil ? "Text on it" : "Text on the front") {
                             TextField("None", text: optional(\.text), axis: .vertical)
                                 .lineLimit(1...3)
+                        }
+                        if live.backImage != nil {
+                            field("Text on the back") {
+                                TextField("None", text: optional(\.backText), axis: .vertical)
+                                    .lineLimit(1...3)
+                            }
                         }
                     }
 
@@ -162,6 +168,13 @@ struct ItemSheet: View {
             }
             .ignoresSafeArea()
         }
+        // The Mac can rewrite details while the sheet is open (a back photo updates them); take its values for fields
+        // the user hasn't touched, so closing the sheet doesn't overwrite them with the old ones.
+        .onChange(of: live) { old, new in
+            func merge<T: Equatable>(_ key: WritableKeyPath<Item, T>) { if draft[keyPath: key] == old[keyPath: key] { draft[keyPath: key] = new[keyPath: key] } }
+            merge(\.name); merge(\.part); merge(\.color); merge(\.secondaryColor); merge(\.description)
+            merge(\.text); merge(\.backText); merge(\.tags); merge(\.wears)
+        }
         .onChange(of: frontPick) { _, pick in load(pick, for: .front) }
         .onChange(of: backPick) { _, pick in load(pick, for: .back) }
         .task(id: "\(backStatus ?? "")\(frontStatus ?? "")") {
@@ -190,7 +203,7 @@ struct ItemSheet: View {
         guard let saved = store.item(original.id) else { return }
         if draft.name != saved.name || draft.part != saved.part || draft.color != saved.color
             || draft.secondaryColor != saved.secondaryColor || draft.tags != saved.tags || draft.wears != saved.wears
-            || draft.description != saved.description || draft.text != saved.text {
+            || draft.description != saved.description || draft.text != saved.text || draft.backText != saved.backText {
             await store.update(draft)
         }
     }
