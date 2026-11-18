@@ -2,6 +2,9 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.5.1 — 2026-11-18
+- Text that appears on both the front and the back stays listed on both sides when a back photo updates a piece
+
 ## 1.5.0 — 2026-11-17
 - Try-ons ignore the clothes in your photo, list the outfit layer by layer, match the scene to the weather, and get three tries
 - Try-ons and cutouts that were running when the server restarted pick up where they left off

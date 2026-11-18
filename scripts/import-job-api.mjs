@@ -405,7 +405,7 @@ async function describeBothSides(ai, record, front, back) {
 Its current details: ${JSON.stringify(current)}
 Update them so they describe the whole piece, front and back.
 - description: one or two sentences for a stylist: fabric and weight, fit, warmth, formality, and notable design details on either side.
-- text: every word on the outside of the FRONT, letter for letter, with placement and relative size, e.g. 'chest: small "DICKIES"'. Leave out size, care and inside-neck labels. Keep the current text unless Image 1 clearly shows otherwise, and move anything that is really on the back to backText.
+- text: every word on the outside of the FRONT, letter for letter, with placement and relative size, e.g. 'chest: small "DICKIES"'. Leave out size, care and inside-neck labels. Keep the current text unless Image 1 clearly shows otherwise. The same words can appear on both sides in different sizes and styles; then list them on each side, never move them from one to the other.
 - backText: the same for the BACK, e.g. 'large "GO BROKE FOR PORSCHE" across the shoulders'. Empty when the back has no legible text.
 - tags: 1-4 lowercase details.
 - color: the main hex color; secondaryColor: a genuinely distinct second color across both sides, or null.` });
