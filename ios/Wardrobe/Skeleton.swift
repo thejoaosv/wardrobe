@@ -1,4 +1,6 @@
+import CoreImage
 import SwiftUI
+import Vision
 
 /// Silhouette families used as loading skeletons.
 nonisolated enum GarmentKind: String, CaseIterable {
@@ -158,5 +160,80 @@ struct CyclingGarmentSkeleton: View {
             }
         }
         .accessibilityLabel("Finding clothes")
+    }
+}
+
+/// The user's own outline, cut from their try-on photo on the phone, with the same sweeping light as the garments.
+struct BodySkeleton: View {
+    @Environment(Store.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var silhouette: CGImage?
+    @State private var sweep = false
+
+    var body: some View {
+        Group {
+            if let silhouette {
+                let mask = Image(decorative: silhouette, scale: 1).resizable().scaledToFit().luminanceToAlpha()
+                ZStack {
+                    Theme.ink.opacity(0.08)
+                    GeometryReader { geometry in
+                        LinearGradient(colors: [.clear, Theme.ink.opacity(0.09), .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: geometry.size.height * 0.35)
+                            .offset(y: sweep ? geometry.size.height : -geometry.size.height * 0.35)
+                    }
+                    .opacity(reduceMotion ? 0 : 1)
+                }
+                .mask(mask)
+                .transition(.opacity)
+            } else {
+                Image(systemName: "figure.stand").resizable().scaledToFit().fontWeight(.ultraLight)
+                    .foregroundStyle(Theme.ink.opacity(0.08)).padding(.vertical, 24)
+            }
+        }
+        .animation(.easeOut(duration: 0.4), value: silhouette != nil)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) { sweep = true }
+        }
+        .task(id: store.referenceStamp) {
+            guard let url = store.url("/api/import/model-reference", width: 900),
+                  let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+            silhouette = await Task.detached(priority: .userInitiated) { Self.person(in: data) }.value
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// White where the person is, black elsewhere, at the photo's proportions; nil when no person is found.
+    nonisolated static func person(in data: Data) -> CGImage? {
+        guard let photo = UIImage(data: data)?.cgImage else { return nil }
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        guard (try? VNImageRequestHandler(cgImage: photo).perform([request])) != nil,
+              let buffer = request.results?.first?.pixelBuffer else { return nil }
+        let full = CIImage(cvPixelBuffer: buffer)
+        guard let body = bounds(of: buffer) else { return nil }
+        // Softened a touch so the edge reads as a skeleton, not a cutout; cropped to the body so it fills the space.
+        let mask = full.clampedToExtent().applyingGaussianBlur(sigma: 2).cropped(to: body)
+        return CIContext().createCGImage(mask, from: body)
+    }
+
+    /// The person's box in Core Image coordinates (origin bottom left), with a little room around it.
+    nonisolated private static func bounds(of buffer: CVPixelBuffer) -> CGRect? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer), stride = CVPixelBufferGetBytesPerRow(buffer)
+        var minX = width, maxX = -1, minY = height, maxY = -1
+        for y in 0..<height {
+            let row = base + y * stride
+            for x in 0..<width where row[x] > 127 {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let pad = Double(max(maxX - minX, maxY - minY)) * 0.03
+        let box = CGRect(x: Double(minX), y: Double(height - 1 - maxY), width: Double(maxX - minX + 1), height: Double(maxY - minY + 1))
+        return box.insetBy(dx: -pad, dy: -pad).intersection(CGRect(x: 0, y: 0, width: width, height: height)).integral
     }
 }

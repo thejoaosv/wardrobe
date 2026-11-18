@@ -427,15 +427,10 @@ private struct TryOnPanel: View {
                 .accessibilityLabel("You wearing \(plan.name)")
                 .accessibilityHint("Opens it full screen")
             case "processing":
-                VStack(spacing: 12) {
-                    Image(systemName: "sparkles").font(.system(size: 34, weight: .light)).symbolEffect(.pulse)
-                    Text("Dressing you…").font(.display(24))
-                    Text(store.progress["tryon:\(plan.date)"] ?? "This takes about a minute.")
-                        .font(.subheadline).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3)
-                        .contentTransition(.opacity)
+                VStack(spacing: 18) {
+                    BodySkeleton().frame(maxHeight: .infinity)
+                    TryOnSteps(status: store.progress["tryon:\(plan.date)"])
                 }
-                .foregroundStyle(Theme.ink)
-                .animation(.easeInOut(duration: 0.25), value: store.progress["tryon:\(plan.date)"])
             default:
                 VStack(spacing: 14) {
                     Image(systemName: "person.crop.rectangle").font(.system(size: 40, weight: .thin)).foregroundStyle(Theme.muted)
@@ -456,6 +451,50 @@ private struct TryOnPanel: View {
         .fullScreenCover(isPresented: $showing) {
             TryOnViewer(plan: plan).navigationTransition(.zoom(sourceID: plan.date, in: zoom))
         }
+    }
+}
+
+/// Where a try-on is: in line, being made (again, after a rejected try), or being checked against the outfit.
+private struct TryOnSteps: View {
+    let status: String?
+    private static let steps = ["In line", "Dressing you", "Checking"]
+
+    /// The server reports "Waiting in line…" or "Up next…", then nothing while it makes the photo, "Checking the photo…",
+    /// and "Retrying (2/3): reason" when the check sends it back.
+    private var current: Int {
+        guard let status else { return 1 }
+        if status.hasPrefix("Waiting") || status.hasPrefix("Up next") { return 0 }
+        return status.hasPrefix("Checking") ? 2 : 1
+    }
+
+    private var detail: String {
+        guard let status else { return "About a minute" }
+        if current == 2 { return "Making sure every piece and print matches" }
+        return status.replacingOccurrences(of: #"^Retrying \((\d)/(\d)\): "#, with: "Try $1 of $2: ", options: .regularExpression)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach(Array(Self.steps.enumerated()), id: \.offset) { index, step in
+                    HStack(spacing: 6) {
+                        Image(systemName: index < current ? "checkmark.circle.fill" : index == current ? "circle.dotted" : "circle")
+                            .symbolEffect(.rotate, isActive: index == current)
+                        Text(step)
+                    }
+                    .font(.footnote.weight(index == current ? .semibold : .regular))
+                    .foregroundStyle(index <= current ? Theme.ink : Theme.muted)
+                    if index < Self.steps.count - 1 {
+                        Capsule().fill(index < current ? Theme.ink : Theme.muted.opacity(0.3)).frame(width: 14, height: 1.5)
+                    }
+                }
+            }
+            Text(detail).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(2).contentTransition(.opacity)
+        }
+        .animation(.easeInOut(duration: 0.25), value: status)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Trying it on: \(Self.steps[current])")
+        .accessibilityValue(detail)
     }
 }
 
