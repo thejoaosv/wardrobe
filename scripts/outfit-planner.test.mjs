@@ -3,7 +3,7 @@ import test from "node:test";
 import sharp from "sharp";
 import { buildTryOnPrompt, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
 import { pickModels } from "./openai-provider.mjs";
-import { duplicateCombos, historyFor, layerIssues, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { duplicateCombos, historyFor, includeIssues, layerIssues, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const items = [
   { id: "tee", part: "upperbody" },
@@ -110,4 +110,14 @@ test("layerIssues follows the weather only when the wardrobe allows it", () => {
   assert.deepEqual(layerIssues(day("cold"), worn("tee", "jeans"), items), []);
   // A midlayer alone is not a base top.
   assert.throws(() => validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["hoodie", "jeans"] }] }, { items: wardrobe, days: day("cold") }), /no usable outfit/);
+});
+
+test("includeIssues flags a day that skipped the piece to build around", () => {
+  const days = [{ date: "2026-11-16", include: "shirt" }, { date: "2026-11-17" }];
+  const planned = [{ date: "2026-11-16", garmentIds: ["tee", "jeans"] }, { date: "2026-11-17", garmentIds: ["tee", "jeans"] }];
+  assert.match(includeIssues(days, planned)[0], /2026-11-16 must include shirt/);
+  assert.deepEqual(includeIssues(days, [{ date: "2026-11-16", garmentIds: ["shirt", "jeans"] }]), []);
+  const [day] = validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["shirt", "jeans"] }] }, { items, days: [{ date: "2026-11-16", style: "x", palette: "bold", note: "dinner" }] });
+  assert.equal(day.palette, "bold");
+  assert.equal(day.note, "dinner");
 });

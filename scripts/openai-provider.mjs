@@ -6,6 +6,14 @@ import { promisify } from "node:util";
 
 const SNAPSHOT = /-\d{4}-\d{2}-\d{2}$/;
 
+// Codex turns still running; stopped with the server so a restart doesn't leave orphans spending plan usage.
+// Shared through globalThis because Vite re-imports this module on every in-process restart.
+const children = (globalThis.__wardrobeCodex ??= new Set());
+if (!globalThis.__wardrobeCodexExit) {
+  globalThis.__wardrobeCodexExit = true;
+  process.once("exit", () => children.forEach((child) => child.kill("SIGTERM")));
+}
+
 // Smallest tier that handles each task well (luna < terra < sol < astra); the big tiers only burn plan usage here.
 export const TASK_TIERS = { vision: "terra", planner: "terra", imageAgent: "luna" };
 
@@ -98,6 +106,7 @@ export function createAIProvider(setting) {
       let threadId = null;
       await new Promise((resolve, reject) => {
         const child = spawn(setting("CODEX_BIN", "codex"), args, { stdio: ["pipe", "pipe", "pipe"] });
+        children.add(child);
         let stderr = "";
         let events = "";
         // The first JSON event names the thread; its generated images live in a folder of that name.
@@ -110,6 +119,7 @@ export function createAIProvider(setting) {
         child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-4000); });
         child.on("error", reject);
         child.on("close", (code) => {
+          children.delete(child);
           clearTimeout(timer);
           code === 0 ? resolve() : reject(new Error(`Codex failed (${code}): ${stderr.trim().split("\n").at(-1) || "no output"}`));
         });
@@ -183,6 +193,8 @@ export function createAIProvider(setting) {
         const inputs = images.map((image, index) => `- Image ${index + 1} (./image-${index + 1}.png): ${image.role}`).join("\n");
         const { dir, last, threadId } = await codex({
           sandbox: "workspace-write",
+          // Try-ons with several reference images can take longer than a text answer.
+          timeout: 10 * 60 * 1000,
           model: await codexModel("imageAgent"),
           images: images.map((image) => image.data),
           prompt: `${images.length ? `Call your built-in image_gen tool exactly once, in edit mode, with ALL of the input images below passed to it as input images. They are attached to this message; if any is not visible to you, load it from its path with view_image first. Never generate from the text alone: the result must reproduce the real garments in these photos.

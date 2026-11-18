@@ -2,6 +2,12 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.5.0 — 2026-11-17
+- Try-ons ignore the clothes in your photo, list the outfit layer by layer, match the scene to the weather, and get three tries
+- Try-ons and cutouts that were running when the server restarted pick up where they left off
+- Adding a back photo updates the piece's colors, description and the text on each side
+- Plans can set a color palette, a piece to build around and a note per day
+
 ## 1.4.0 — 2026-11-17
 - Photos are searched for clothes in the background and resume after a restart, so a phone losing Wi-Fi or going to sleep loses nothing
 - Outfit styling runs in the background too

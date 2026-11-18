@@ -83,7 +83,7 @@ Fail Image 2 if any of these is true:
 4. The garment is cropped, incomplete or has a messy, broken outline.
 5. The garment is not laid out straight: it is twisted, folded over, heavily wrinkled, or a sleeve or hem is tucked or bunched.
 
-Ignore small differences in lighting, and creases or wear that are part of the real garment's look.
+Ignore small differences in lighting, creases or wear that are part of the real garment's look, and size, care or inside-neck labels.
 pass is true only when none apply. problems lists each failure as a short instruction for the next attempt, e.g. "The large chest text must read ROTATION, not RUTGERS" or "Lay the left sleeve flat instead of folded".`,
   });
   return problemsOf(verdict, metadata.text);
@@ -102,13 +102,14 @@ ${references}
 Fail Image 2 if any of these is true:
 1. The person is not recognizably the same as Image 1 (face, hair, build), or there is more than one person.
 2. A referenced garment is missing, hidden, or changed in type, color, pattern or fit.
-3. Text, logos or graphics on a garment differ from its reference. Transcribe the garment text you can see in the references into sourceText and in Image 2 into outputText. A changed word or letter is a failure.
+3. Prominent text or graphics differ from their reference: chest graphics, slogans and large logos, the things readable in a full-length photo. Transcribe that text from the references into sourceText and from Image 2 into outputText; a changed word is a failure. Ignore small logos, patches and labels that can't be read at this scale.
 4. An unreferenced visible garment, hat, bag or accessory was added (plain shoes are fine when no shoes are referenced).
 5. The body is cropped, distorted, or has broken anatomy such as extra fingers or limbs.
 
 pass is true only when none apply. problems lists each failure as a short instruction for the next attempt.`,
   });
-  return problemsOf(verdict, garments.map((garment) => garment.text || "").join(" "));
+  // No letter-by-letter check here: small text on a full-length photo isn't readable, so the reviewer judges what is.
+  return problemsOf(verdict, "");
 }
 
 const DETECTION = {

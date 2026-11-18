@@ -6,7 +6,7 @@ import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback 
 import { createAIProvider } from "./openai-provider.mjs";
 import { parseChangelog } from "./changelog.mjs";
 import { createKeyedLock, createQueue } from "./queue.mjs";
-import { DATE, DEFAULT_WEARS, WEATHERS, buildPlanPrompt, historyFor, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { DATE, DEFAULT_WEARS, PALETTES, WEATHERS, buildPlanPrompt, historyFor, includeIssues, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
 const ASSET_ROOT = "/api/import/assets";
@@ -16,13 +16,13 @@ const DECISIONS = new Set(["approve", "reject"]);
 const PARTS = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody", "accessories_up", "shoes"]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 // Bumped when the app needs endpoints or fields an older server lacks; the app compares it with its minimum.
-export const API_VERSION = 5;
+export const API_VERSION = 6;
 const SETTINGS = { checks: new Set(["thorough", "fast"]) };
 // wears: how many times each category is worn before washing, unless a piece sets its own.
 const DEFAULT_SETTINGS = { checks: "thorough", wears: DEFAULT_WEARS };
 // Generations tried before the best one goes to the user with the reviewer's remaining notes.
 const CUTOUT_ATTEMPTS = 3;
-const TRY_ON_ATTEMPTS = 2;
+const TRY_ON_ATTEMPTS = 3;
 const DETECT_ATTEMPTS = 2;
 const PLAN_ATTEMPTS = 3;
 
@@ -77,6 +77,7 @@ function normalizeMetadata(value = {}) {
     secondaryColor,
     description: typeof metadata.description === "string" ? metadata.description.trim().slice(0, 400) : "",
     text: typeof metadata.text === "string" ? metadata.text.trim().slice(0, 200) : "",
+    backText: typeof metadata.backText === "string" ? metadata.backText.trim().slice(0, 200) : "",
     tags: Array.isArray(metadata.tags) ? metadata.tags.filter((tag) => typeof tag === "string").map((tag) => tag.trim().toLowerCase().slice(0, 40)).filter(Boolean).slice(0, 12) : [],
     boundingBox: normalizeBoundingBox(metadata.boundingBox),
   };
@@ -329,34 +330,45 @@ export function tryOnReferences(garments) {
   return garments.flatMap((item) => [{ item, side: "front", image: item.image }, ...(item.backImage ? [{ item, side: "back", image: item.backImage }] : [])]);
 }
 
+const LAYER_ORDER = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"];
+const SCENES = { warm: "a sunny, warm day outdoors", mild: "a bright, mild day", cold: "a crisp, cold day with soft winter light", rain: "an overcast, rainy-looking day on damp pavement, without rain drops on the lens" };
+
 export function buildTryOnPrompt(plan, garments) {
   const refs = tryOnReferences(garments);
-  const references = refs.map(({ item, side }, index) => `Image ${index + 2}: exact ${PART_NAMES[item.part] || "garment"} reference (${item.name}), ${side} view.${item.text && side === "front" ? ` Its text reads: ${item.text}.` : ""}`).join("\n");
+  const references = refs.map(({ item, side }, index) => {
+    const text = side === "front" ? item.text : item.backText;
+    return `Image ${index + 2}: exact ${PART_NAMES[item.part] || "garment"} reference (${item.name}), ${side} view.${text ? ` Its ${side} text reads: ${text}.` : ""}`;
+  }).join("\n");
   const backs = refs.filter((ref) => ref.side === "back").map((ref) => ref.item.name);
+  const worn = [...garments].sort((a, b) => LAYER_ORDER.indexOf(a.part) - LAYER_ORDER.indexOf(b.part))
+    .map((item) => `${PART_NAMES[item.part] || "garment"}: ${item.name}`).join("; ");
   const composition = backs.length
     ? `Full body from head to shoes, centered. Pose the person in a natural three-quarter back view, turned about 135 degrees away from the camera and glancing back over the shoulder, so the back of ${backs.join(" and ")} is clearly visible while the face stays recognizable and the front of the outfit is still partly readable.`
-    : "Full body from head to shoes, centered, relaxed mostly front-facing pose with arms away from the torso so every garment stays readable.";
+    : "Full body from head to shoes with a little space above and below, centered, relaxed mostly front-facing pose with arms slightly away from the torso so every garment stays readable.";
   const layered = garments.some((item) => item.part === "wholebody_up" || item.part === "midlayer")
     ? "\nLayering: wear the layers in order, base top innermost, then the mid layer, then the outer layer, so each stays identifiable (a collar or hem of the inner layer may show). Only open a layer if its reference shows a real full front zipper or buttons; never invent a closure."
     : "";
   return `Use case: identity-preserve
 Asset type: vertical outfit try-on photograph
 
-Image 1: identity reference for the exact person to preserve.
+Image 1: the person to dress. Use it only for who they are: face, hair, glasses if worn, skin, age, build and body proportions. Ignore the clothes, shoes and accessories they wear in Image 1; none of them may appear in the result.
+The other images are product cutouts of the exact garments to wear, laid flat on a transparent background:
 ${references}
 
-Primary request: Create a photorealistic vertical 2:3 editorial fashion photograph of the person from Image 1 wearing all of the referenced garments, and only those garments.
+Primary request: Create a photorealistic vertical 2:3 fashion photograph of the person from Image 1 wearing exactly this outfit and nothing else: ${worn}.
 
 Outfit: ${plan.name} (${plan.style}).
-Scene/backdrop: a restrained, softly lit real-world setting that suits a ${plan.style} outfit.
+Scene: ${SCENES[plan.weather] || "a softly lit, real-world setting"} that suits a ${plan.style} outfit. Natural light, true-to-life colors, the background simple and out of focus so the outfit stands out.
 
 Subject: Preserve the person's recognizable face, hair, glasses if worn, age, build, skin texture and body proportions. ${garments.some((item) => item.part === "shoes") ? "" : "Plain understated shoes are allowed because no shoe reference is provided. "}Do not add, replace or invent any other visible clothing or accessory.${layered}
 
 Composition: ${composition}
 
-Garment fidelity: Preserve every garment precisely: color, material, fit, construction, pattern, graphics, logos, text, proportions and closures.
+Garment fidelity: Each garment must match its cutout exactly: color, material, fit, construction, pattern, graphics, logos, proportions and closures, worn with natural drape and creases on a real body. Text must read letter for letter as listed; never swap in a different or more familiar word.
 
-Avoid: hidden or redesigned garments, changed logos or text, extra layers, hats, bags or jewelry that were not referenced, crossed arms, cropped feet, extra people, text overlays, watermarks, studio cutout look, or synthetic AI polish.`;
+Realism: a real camera photograph with natural skin texture, believable fabric, correct hands and feet.
+
+Avoid: hidden or redesigned garments, changed logos or text, the clothes from Image 1, extra layers, hats, bags or jewelry that were not referenced, crossed arms, cropped head or feet, extra people, text overlays, watermarks, studio cutout look, or synthetic AI polish.`;
 }
 
 async function atomicJson(file, value) {
@@ -378,9 +390,26 @@ function stageState() {
   return { status: "pending", decision: null, attempts: 0, assetUrl: null, failedAssetUrl: null, cleanupPreviewUrl: null, cleanupTolerance: 46, cleanupDiagnostics: null, error: null, prompt: null, updatedAt: null };
 }
 
-const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. Only include items the photo is clearly meant to show: what the main person wears, or garments laid out or held as the subject. Leave out other people's clothes, things on hangers, chairs or floors in the background, items mostly out of frame, and layers hidden under others. Include small accessories such as glasses, watches, wristbands, jewelry or bags only when they are the clear focus of the photo, not when they are simply worn with an outfit. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Name each item specifically enough to tell it apart from similar pieces: color, distinguishing graphic or brand, and type, e.g. "Grey ROTATION LX varsity hoodie" or "Black Dickies chest-logo tee", not "Graphic hoodie". Give a primary hex color, an optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags. description is one or two sentences a stylist can plan with: fabric and weight, fit, warmth, formality, and notable design details. text transcribes, letter for letter, every word printed, embroidered or patched on the item with its placement and relative size, e.g. 'front: large arched "ROTATION", small "LX" centered below'; use an empty string when there is no legible text.`;
+const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible in this image. A photo may show one isolated garment or a person wearing several items. Return one record per actual item that should enter a wardrobe. Ignore the person's body and non-wearable background objects. Only include items the photo is clearly meant to show: what the main person wears, or garments laid out or held as the subject. Leave out other people's clothes, things on hangers, chairs or floors in the background, items mostly out of frame, and layers hidden under others. Include small accessories such as glasses, watches, wristbands, jewelry or bags only when they are the clear focus of the photo, not when they are simply worn with an outfit. For each item, include a tight bounding box around only that item using integer coordinates normalized to a 1000 by 1000 image: x and y are the top-left corner, followed by width and height. Boxes may overlap when garments overlap, but each box must focus on one distinct item. Use only these category ids: upperbody (base tops worn against the skin: t-shirts, shirts, polos, tank tops, thin long-sleeve tees), midlayer (warm layers worn over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces, zip-up hoodies), wholebody_up (outerwear: jackets, coats, rain jackets, puffers, blazers, overshirts worn as jackets), lowerbody, accessories_up, shoes. Name each item specifically enough to tell it apart from similar pieces: color, distinguishing graphic or brand, and type, e.g. "Grey ROTATION LX varsity hoodie" or "Black Dickies chest-logo tee", not "Graphic hoodie". Give a primary hex color, an optional genuinely distinct secondary hex color, and 1-4 useful lowercase detail tags. description is one or two sentences a stylist can plan with: fabric and weight, fit, warmth, formality, and notable design details. text transcribes, letter for letter, every word printed, embroidered or patched on the outside of the item with its placement and relative size (leave out size, care and inside-neck labels), e.g. 'front: large arched "ROTATION", small "LX" centered below'; use an empty string when there is no legible text.`;
 
 const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, description: { type: "string" }, text: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "description", "text", "tags", "boundingBox"] } } }, required: ["items"] };
+
+const HEX = { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" };
+const DETAILS_SCHEMA = { type: "object", additionalProperties: false, properties: { description: { type: "string" }, text: { type: "string" }, backText: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, color: HEX, secondaryColor: { anyOf: [HEX, { type: "null" }] } }, required: ["description", "text", "backText", "tags", "color", "secondaryColor"] };
+
+// Re-reads a piece's details from both sides once it has a back: colors, a description covering both, and each side's text.
+async function describeBothSides(ai, record, front, back) {
+  const flat = (bytes) => sharp(bytes).flatten({ background: "#e8e8e8" }).png().toBuffer();
+  const current = { description: record.description, text: record.text, tags: record.tags, color: record.color, secondaryColor: record.secondaryColor };
+  return ai.json({ kind: "vision", schema: DETAILS_SCHEMA, images: [await flat(front), await flat(back)], prompt: `Image 1 is the front and Image 2 the back of the same piece in a wardrobe app: ${record.name} (${record.part}).
+Its current details: ${JSON.stringify(current)}
+Update them so they describe the whole piece, front and back.
+- description: one or two sentences for a stylist: fabric and weight, fit, warmth, formality, and notable design details on either side.
+- text: every word on the outside of the FRONT, letter for letter, with placement and relative size, e.g. 'chest: small "DICKIES"'. Leave out size, care and inside-neck labels. Keep the current text unless Image 1 clearly shows otherwise, and move anything that is really on the back to backText.
+- backText: the same for the BACK, e.g. 'large "GO BROKE FOR PORSCHE" across the shoulders'. Empty when the back has no legible text.
+- tags: 1-4 lowercase details.
+- color: the main hex color; secondaryColor: a genuinely distinct second color across both sides, or null.` });
+}
 
 async function analyzeClothes(ai, image, feedback = []) {
   const parsed = await ai.json({ prompt: withFeedback(ANALYZE_PROMPT, feedback), images: [image], schema: ANALYZE_SCHEMA, kind: "vision" });
@@ -417,18 +446,22 @@ export function wardrobeImportApi(options = {}) {
   let libraryAssetDir;
   let plansFile;
   let outfitDir;
-  const running = new Map();
-  const detectQueue = createQueue(2);
-  const jobLock = createKeyedLock();
+  // Vite restarts the server inside the same process when the config or these scripts change, and work already in
+  // flight keeps running in the old copy of this plugin. All live state is shared through globalThis, so the new copy
+  // sees that work instead of resuming it a second time, and both copies queue their file writes in one line.
+  const shared = (globalThis.__wardrobe ??= {});
+  const running = (shared.running ??= new Map());
+  const detectQueue = (shared.detectQueue ??= createQueue(2));
+  const jobLock = (shared.jobLock ??= createKeyedLock());
   // Photos being searched for clothes in the background, by id. Their photo stays on disk until done, so a restart resumes them.
-  const detections = new Map();
+  const detections = (shared.detections ??= new Map());
   // Days being styled in the background, by date; a failure stays until the app has seen it.
-  const styling = new Map();
+  const styling = (shared.styling ??= new Map());
   // Small WebP previews of stored PNGs, keyed by file, width and change time.
-  const previews = new Map();
+  const previews = (shared.previews ??= new Map());
   let detectionsDir;
   // Live status lines for running AI work ("Checking the cutout…"), keyed by what they belong to; the app polls them.
-  const progress = new Map();
+  const progress = (shared.progress ??= new Map());
   const say = (key, message) => { if (key) (message ? progress.set(key, message) : progress.delete(key)); };
   const waiting = (key) => (ahead) => say(key, ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…");
   const queued = (key, task) => imageQueue(() => { say(key, null); return task(); }, waiting(key));
@@ -476,13 +509,13 @@ export function wardrobeImportApi(options = {}) {
     await writeFile(file, photo);
     return setupStatus();
   }
-  let writeQueue = Promise.resolve();
+  shared.writeQueue ??= Promise.resolve();
   // Serializes read-modify-write cycles on library.json and plans.json.
-  const serial = (task) => (writeQueue = writeQueue.then(task, task));
+  const serial = (task) => (shared.writeQueue = shared.writeQueue.then(task, task));
   const setting = (name, fallback = "") => options.env?.[name] || process.env[name] || fallback;
   const ai = createAIProvider(setting);
   // Image work (cutouts, try-ons) runs a few at a time so the Mac and the plan's rate limits aren't swamped; the rest wait in line.
-  const imageQueue = createQueue(Math.max(1, Number(setting("WARDROBE_AI_CONCURRENCY", "2")) || 2));
+  const imageQueue = (shared.imageQueue ??= createQueue(Math.max(1, Number(setting("WARDROBE_AI_CONCURRENCY", "2")) || 2)));
 
   async function setupStatus() {
     const { provider, hasApiKey, hasCodex } = await ai.status();
@@ -537,6 +570,9 @@ export function wardrobeImportApi(options = {}) {
       date: typeof day?.date === "string" && DATE.test(day.date) && !Number.isNaN(Date.parse(day.date)) ? day.date : null,
       style: typeof day?.style === "string" ? day.style.trim().slice(0, 80) || "everyday" : "everyday",
       weather: WEATHERS.has(day?.weather) ? day.weather : "auto",
+      palette: PALETTES.has(day?.palette) ? day.palette : "any",
+      include: typeof day?.include === "string" && day.include ? day.include : undefined,
+      note: typeof day?.note === "string" ? day.note.trim().slice(0, 200) : "",
       replace: typeof day?.replace === "string" ? day.replace : undefined,
     }));
     if (days.some((day) => !day.date) || new Set(days.map((day) => day.date)).size !== days.length) throw Object.assign(new Error("Each day needs a unique YYYY-MM-DD date"), { status: 400 });
@@ -544,6 +580,11 @@ export function wardrobeImportApi(options = {}) {
     const items = library.filter((item) => !item.unavailable);
     if (!items.some((item) => item.part === "upperbody") || !items.some((item) => item.part === "lowerbody")) {
       throw Object.assign(new Error("Plan needs at least one available top and one available bottom"), { status: 409 });
+    }
+    for (const day of days) {
+      if (day.include && !items.some((item) => item.id === day.include)) {
+        throw Object.assign(new Error(`${library.find((item) => item.id === day.include)?.name || "That piece"} is in the wash or was removed`), { status: 409 });
+      }
     }
     const plans = await loadPlans();
     // A swap keeps the rest of the day's outfit (whatever is still available) and only changes one piece.
@@ -564,7 +605,7 @@ export function wardrobeImportApi(options = {}) {
         attempts: PLAN_ATTEMPTS,
         make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\nA previous attempt broke these rules; avoid them: ${feedback.join("; ")}.` : prompt, schema: planSchema })
           .then((result) => validatePlan(result, { items, days })),
-        check: (planned) => [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items)],
+        check: (planned) => [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items), ...includeIssues(days, planned)],
         onRetry: (problems, attempt) => report(`Restyling to fix ${problems.length === 1 ? "a clash" : `${problems.length} clashes`} (${attempt}/${PLAN_ATTEMPTS})…`),
       }));
     } catch (error) {
@@ -608,11 +649,11 @@ export function wardrobeImportApi(options = {}) {
 
   async function editRecord(id, input) {
     // Invalid values are ignored rather than normalized to defaults, so a bad category never turns a piece into a top.
-    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), description: (value) => typeof value === "string", text: (value) => typeof value === "string", tags: Array.isArray, wears: (value) => value === null || (Number.isInteger(value) && value >= 1 && value <= 10) };
+    const valid = { name: (value) => typeof value === "string", part: (value) => PARTS.has(value), color: (value) => HEX_COLOR.test(value), secondaryColor: (value) => value === null || HEX_COLOR.test(value), description: (value) => typeof value === "string", text: (value) => typeof value === "string", backText: (value) => typeof value === "string", tags: Array.isArray, wears: (value) => value === null || (Number.isInteger(value) && value >= 1 && value <= 10) };
     const fields = Object.keys(valid).filter((key) => key in input && valid[key](input[key]));
     const record = await updateRecord(id, (record) => {
       const metadata = normalizeMetadata({ ...record, ...Object.fromEntries(fields.map((key) => [key, input[key]])) });
-      Object.assign(record, { name: metadata.name, part: metadata.part, color: metadata.color, secondaryColor: metadata.secondaryColor, description: metadata.description, text: metadata.text, tags: metadata.tags, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
+      Object.assign(record, { name: metadata.name, part: metadata.part, color: metadata.color, secondaryColor: metadata.secondaryColor, description: metadata.description, text: metadata.text, backText: metadata.backText, tags: metadata.tags, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
       // null goes back to the category default.
       if (input.wears === null) delete record.wears;
       else if (fields.includes("wears")) record.wears = input.wears;
@@ -624,7 +665,8 @@ export function wardrobeImportApi(options = {}) {
   // Makes a side's cutout again in the background like any other generation: from a new photo, else the photo kept
   // for that side, else its current cutout (older pieces kept no photo). A new photo is kept for the next redo.
   async function startCutout(id, side, input) {
-    const upload = input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null;
+    // input.photo is a pending upload resumed after a restart.
+    const upload = input.photo || (input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null);
     const sourceKey = side === "back" ? "backSourceImage" : "sourceImage";
     const imageKey = side === "back" ? "backImage" : "image";
     if (!upload && side === "back" && !(await loadImported()).find((record) => record.id === id)?.backImage) {
@@ -635,7 +677,12 @@ export function wardrobeImportApi(options = {}) {
     if (running.has(lock)) throw Object.assign(new Error(side === "back" ? "The back is already being cut out" : "The cutout is already being redone"), { status: 409 });
     // Reserved before any await so a second request can't start a duplicate generation.
     running.set(lock, null);
-    const record = await updateRecord(id, (record) => { record[side] = { status: "processing" }; }).catch((error) => { running.delete(lock); throw error; });
+    // A new photo is saved first, so a restart can still finish this cutout.
+    const pendingFile = upload ? `${id}-${side}-pending.png` : null;
+    const record = await (async () => {
+      if (pendingFile) await writeFile(libraryFile(pendingFile), upload);
+      return updateRecord(id, (record) => { record[side] = { status: "processing", pending: pendingFile, direction: direction || null }; });
+    })().catch((error) => { running.delete(lock); throw error; });
     if (!record) {
       running.delete(lock);
       throw Object.assign(new Error("Imported wardrobe item not found"), { status: 404 });
@@ -651,7 +698,7 @@ export function wardrobeImportApi(options = {}) {
         const photo = upload || kept || current;
         const fromCutout = photo === current;
         // The front's text describes the front only; the back photo speaks for itself.
-        const metadata = side === "back" ? { ...record, name: `${record.name}, back view`, text: "" } : record;
+        const metadata = side === "back" ? { ...record, name: `${record.name}, back view`, text: record.backText || "" } : record;
         let prompt = buildGarmentPrompt(metadata, chromaKey, { transparent });
         if (side === "back") prompt += "\n\nBack view: Image 1 shows the BACK of this garment. Reconstruct the garment as seen from behind, exactly as in Image 1. Image 2 is the existing front cutout of the same garment: keep color, material and proportions consistent with it, but do not copy front-only details such as buttons, plackets or chest graphics onto the back.";
         if (fromCutout) prompt += "\n\nImage 1 is this piece's current cutout. Recreate the same real garment as a cleaner cutout, and where its text or details contradict the description and text above, follow the description and text.";
@@ -665,11 +712,17 @@ export function wardrobeImportApi(options = {}) {
           check: (cutout) => { say(key, "Checking the cutout…"); return reviewCutout(ai, { photo, cutout, metadata, side, referenceIsCutout: fromCutout }); },
           onRetry: retrying(key, CUTOUT_ATTEMPTS),
         });
+        // A back adds colors, text and details the front alone didn't show.
+        let details = null;
+        if (side === "back") {
+          say(key, "Updating its details…");
+          details = await describeBothSides(ai, record, front, result).catch((error) => { console.warn(`Back details skipped: ${error.message}`); return null; });
+        }
         const stamp = Date.now();
         const file = `${id}-${side === "back" ? "back" : "garment"}-${stamp}.png`;
         const sourceFile = upload ? `${id}-${side}-source-${stamp}.png` : null;
         await writeFile(path.join(libraryAssetDir, file), result);
-        if (sourceFile) await writeFile(path.join(libraryAssetDir, sourceFile), upload);
+        if (sourceFile) await rename(libraryFile(pendingFile), libraryFile(sourceFile));
         // removeBack clears the processing status; then this result is stale and is thrown away.
         let previous = [];
         let removed = false;
@@ -679,6 +732,10 @@ export function wardrobeImportApi(options = {}) {
           record[imageKey] = `${LIBRARY_ASSET_ROOT}/${file}`;
           if (sourceFile) record[sourceKey] = `${LIBRARY_ASSET_ROOT}/${sourceFile}`;
           if (side === "front") record.thumbnail = record.image;
+          if (details) {
+            const metadata = normalizeMetadata({ ...record, ...details });
+            Object.assign(record, { description: metadata.description, text: metadata.text, backText: metadata.backText, tags: metadata.tags, color: metadata.color, secondaryColor: metadata.secondaryColor, palette: [metadata.color, metadata.secondaryColor].filter(Boolean) });
+          }
           record[side] = { status: "ready", warnings: problems, updatedAt: new Date().toISOString() };
         });
         if (!updated) removed = true;
@@ -686,6 +743,7 @@ export function wardrobeImportApi(options = {}) {
         await Promise.all(stale.filter(Boolean).map((name) => rm(libraryFile(name), { force: true })));
       } catch (error) {
         await updateRecord(id, (record) => { if (record[side]?.status === "processing") record[side] = { status: "failed", error: error.message, updatedAt: new Date().toISOString() }; });
+        if (pendingFile) await rm(libraryFile(pendingFile), { force: true });
       } finally {
         say(key, null);
       }
@@ -748,7 +806,9 @@ export function wardrobeImportApi(options = {}) {
             images.push({ data: await readFile(libraryFile(image)), role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name}, ${side} view (transparent cutout)` });
           }
           const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
-          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: item.text, image: await readFile(libraryFile(item.image)) })));
+          // In a back view the front text isn't readable, so only a front-facing try-on is held to it.
+          const facing = !garments.some((item) => item.backImage);
+          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: facing ? item.text : "", image: await readFile(libraryFile(item.image)) })));
           const { result: bytes, problems } = await reviewed({
             attempts: TRY_ON_ATTEMPTS,
             make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments), feedback) }),
@@ -1304,21 +1364,26 @@ export function wardrobeImportApi(options = {}) {
       outfitDir = path.join(dataDir, "outfit-images");
       // Back cutouts cannot survive a restart either.
       const library = await loadImported().catch(() => []);
+      // Cutouts and try-ons that were running when the server stopped are resumed once everything below is set up.
       const interruptedCutouts = library.flatMap((record) => ["back", "front"].filter((side) => record[side]?.status === "processing").map((side) => [record, side]));
-      for (const [record, side] of interruptedCutouts) record[side] = { status: "failed", error: "Interrupted, try again" };
-      if (interruptedCutouts.length) await atomicJson(importedFile, library);
-      // A try-on cannot survive a restart; let the user ask again.
-      const plans = await loadPlans();
-      const interrupted = Object.values(plans).filter((plan) => plan.tryOn?.status === "processing");
-      for (const plan of interrupted) plan.tryOn = { status: "failed", error: "Interrupted, try again", updatedAt: new Date().toISOString() };
-      if (interrupted.length) await atomicJson(plansFile, plans);
+      const interruptedTryOns = Object.values(await loadPlans()).filter((plan) => plan.tryOn?.status === "processing");
       libraryAssetDir = path.join(dataDir, "imported");
       await mkdir(jobsDir, { recursive: true });
       await mkdir(libraryAssetDir, { recursive: true });
+      for (const [record, side] of interruptedCutouts) {
+        if (running.has(`${side}:${record.id}`)) continue;
+        const pending = record[side].pending ? await readFile(libraryFile(record[side].pending)).catch(() => null) : null;
+        startCutout(record.id, side, { photo: pending, direction: record[side].direction || "" }).catch((error) => updateRecord(record.id, (fresh) => {
+          fresh[side] = { status: "failed", error: `Interrupted: ${error.message}`, updatedAt: new Date().toISOString() };
+        }));
+      }
+      for (const plan of interruptedTryOns) {
+        startTryOn(plan.date).catch((error) => saveTryOn(plan.date, plan.garmentIds.join("+"), { status: "failed", error: error.message }));
+      }
       // Photos that were still being searched when the server stopped.
       for (const name of await readdir(detectionsDir).catch(() => [])) {
         const match = name.match(/^([\w-]{1,64})\.png$/);
-        if (match) runDetection(match[1], path.join(detectionsDir, name), await readFile(path.join(detectionsDir, name)));
+        if (match && !detections.has(match[1])) runDetection(match[1], path.join(detectionsDir, name), await readFile(path.join(detectionsDir, name)));
       }
       const ids = await readdir(jobsDir).catch(() => []);
       for (const id of ids) {
@@ -1342,7 +1407,7 @@ export function wardrobeImportApi(options = {}) {
           continue;
         }
         if (job.stages.crop && job.stages.crop.status !== "approved") continue;
-        if (["processing", "queued"].includes(job.stages.garment.status)) {
+        if (["processing", "queued"].includes(job.stages.garment.status) && !running.has(`${job.id}:garment`)) {
           job.stages.garment.status = "pending";
           await saveJob(job);
           void generate(job, "garment");

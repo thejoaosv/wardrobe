@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: "0.0.0.0",
+      // Fail instead of moving to the next port: a second server on 5174 would work on the same data folder,
+      // doubling every AI job and racing the first one's saves, while the app keeps talking to 5173.
+      strictPort: true,
       // ".local" lets the iOS app reach this Mac by its Bonjour name, e.g. my-mac.local.
       allowedHosts: [".local"],
       warmup: {
