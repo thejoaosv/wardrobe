@@ -2,6 +2,13 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.7.0 — 2026-11-18
+- Try-ons edit your own photo, keeping your face, hair, glasses and pose, and change only the clothes and the scene
+- A close-up of your face, cropped from your photo once, guides the try-on and its check
+- Outfits with many pieces send them on one numbered sheet, since the image tool takes at most five images
+- Codex passes the try-on brief to the image tool word for word
+- The check no longer fails a tee for being covered by its hoodie
+
 ## 1.6.0 — 2026-11-18
 - Restyling a day gives a clearly different outfit and never swings back to one you already saw
 - Outfits rotate your bottoms and hoodies instead of leaning on one favorite, and don't pair the same two pieces again within a few days
