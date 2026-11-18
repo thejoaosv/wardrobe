@@ -30,6 +30,13 @@ struct WardrobeApp: App {
                     }
                     store.progress = [:]
                 }
+                .task(id: scenePhase) {
+                    // Notices a lost Mac within seconds, so taps fail at once instead of after a long timeout.
+                    while scenePhase == .active && !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(store.isOnline ? 5 : 3))
+                        await store.checkConnection()
+                    }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background, store.hasPendingWork, let base = store.baseURL {
                         Notifier.shared.arm(base: base)
@@ -101,6 +108,18 @@ struct RootView: View {
             tab = previous
             store.sheet = previous == .closet ? .clothes : .plan
         }
+        .overlay(alignment: .top) {
+            if !store.isOnline {
+                Label("Not connected to your Mac", systemImage: "wifi.slash")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(Theme.spring, value: store.isOnline)
         .sheet(item: $store.sheet) { AddSheet(initial: $0) }
     }
 }

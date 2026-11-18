@@ -17,8 +17,8 @@ struct SettingsView: View {
 
                     link(.connection) {
                         HStack(spacing: 10) {
-                            Circle().fill(store.config == nil ? Color.red : store.serverIsOutdated ? Color.orange : Color.green).frame(width: 8, height: 8)
-                            Text(store.config == nil ? "Not connected to your Mac" : store.serverIsOutdated ? "Your Mac needs an update" : "Connected to your Mac")
+                            Circle().fill(!store.isConnected ? Color.red : store.serverIsOutdated ? Color.orange : Color.green).frame(width: 8, height: 8)
+                            Text(!store.isConnected ? "Not connected to your Mac" : store.serverIsOutdated ? "Your Mac needs an update" : "Connected to your Mac")
                                 .font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
                             Spacer()
                             RowValue()
@@ -105,7 +105,7 @@ private struct ConnectionPage: View {
             }
 
             Panel(title: "Status") {
-                if store.config != nil {
+                if store.isConnected {
                     PanelRow(title: "Connected", symbol: "checkmark.circle.fill", detail: store.version.map { "Server \($0.version)" })
                 } else {
                     PanelRow(title: "Not connected", symbol: "xmark.circle", detail: store.connectionError)

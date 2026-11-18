@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 import UIKit
 
@@ -174,6 +175,17 @@ final class Store {
     var sheetDepth = 0
     /// Why the last refresh could not reach the server, shown in the Server sheet.
     var connectionError: String?
+    /// False as soon as a request or the heartbeat can't reach the Mac, so actions fail at once instead of after a timeout.
+    var isOnline = true
+    var isConnected: Bool { isOnline && config != nil }
+    private static let offlineMessage = "Couldn't reach your Mac. Check that it's awake and on the same Wi-Fi, then try again."
+    private let pathMonitor = NWPathMonitor()
+
+    init() {
+        // Wi-Fi coming or going is checked right away rather than at the next heartbeat.
+        pathMonitor.pathUpdateHandler = { [weak self] _ in Task { @MainActor in await self?.checkConnection() } }
+        pathMonitor.start(queue: .main)
+    }
     /// The sheet the root view presents (chooser, plan or import).
     var sheet: AppSheet?
     /// Days the stylist is working on right now, by date; their weather shapes the loading skeleton.
@@ -245,9 +257,12 @@ final class Store {
 
     /// Runs an action and surfaces failures as an alert instead of throwing.
     private func run(_ action: () async throws -> Void) async {
+        if !isOnline { await checkConnection() }
+        guard isOnline else { error = Self.offlineMessage; return }
         do { try await action() } catch is CancellationError {} catch let error as URLError where error.code == .cancelled {} catch let error as URLError where Self.transient.contains(error.code) {
             print("Wardrobe request failed: \(error)")
-            self.error = "Couldn't reach your Mac. Check that it's awake and on the same Wi-Fi, then try again."
+            isOnline = false
+            self.error = Self.offlineMessage
         } catch {
             print("Wardrobe request failed: \(error)")
             self.error = error.localizedDescription
@@ -262,6 +277,7 @@ final class Store {
             async let jobs: [Job] = send("/api/import/jobs")
             (self.items, self.plans, self.config, self.jobs) = try await (items, plans, config, jobs)
             connectionError = nil
+            isOnline = true
             // Older servers lack these; that is what serverIsOutdated reports.
             version = try? await send("/api/import/version")
             settings = try? await send("/api/import/settings")
@@ -272,7 +288,22 @@ final class Store {
         } catch let error as URLError where error.code == .cancelled {
         } catch {
             print("Wardrobe could not reach \(serverURL): \(error)")
-            config = nil
+            isOnline = false
+            connectionError = error.localizedDescription
+        }
+    }
+
+    /// A short look at whether the Mac answers; everything is reloaded when it comes back.
+    func checkConnection() async {
+        guard let url = url("/api/import/version") else { return }
+        do {
+            let (_, response) = try await session.data(for: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 4))
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            if !isOnline { await refresh() }
+        } catch is CancellationError {
+        } catch let error as URLError where error.code == .cancelled {
+        } catch {
+            isOnline = false
             connectionError = error.localizedDescription
         }
     }
@@ -307,7 +338,7 @@ final class Store {
     }
 
     func loadItems() async {
-        await run { items = try await send("/api/import/wardrobe") }
+        if let latest: [Item] = try? await send("/api/import/wardrobe") { items = latest }
     }
 
     /// Saves edited details; the server normalizes them and returns the stored piece.
@@ -409,7 +440,7 @@ final class Store {
     }
 
     func loadPlans() async {
-        await run { plans = try await send("/api/import/plans") }
+        if let latest: [Plan] = try? await send("/api/import/plans") { plans = latest }
     }
 
     func tryOn(_ plan: Plan) async {
@@ -438,7 +469,7 @@ final class Store {
     }
 
     func loadJobs() async {
-        await run { jobs = try await send("/api/import/jobs") }
+        if let latest: [Job] = try? await send("/api/import/jobs") { jobs = latest }
     }
 
     /// Uploads a photo; the Mac searches it in the background and poll() follows along.
