@@ -192,6 +192,8 @@ final class Store {
     var planning: [String: PlanDay] = [:]
     var planningDates: Set<String> { Set(planning.keys).union(styling.filter { $0.status == "working" }.map(\.date)) }
     var styling: [Styling] = []
+    /// Days whose styling request is still on its way, so a status check that beats it to the Mac doesn't drop them.
+    private var startingPlans: Set<String> = []
     /// Photos still uploading, then searched on the Mac.
     var uploading: [String] = []
     var detections: [Detection] = []
@@ -391,6 +393,8 @@ final class Store {
     func generate(_ days: [PlanDay]) async {
         let dates = days.map { Day.string($0.date) }
         for day in days { planning[Day.string(day.date)] = day }
+        startingPlans.formUnion(dates)
+        defer { startingPlans.subtract(dates) }
         await run {
             let body = days.map { day in
                 var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather, "palette": day.palette, "note": day.note]
@@ -425,11 +429,12 @@ final class Store {
 
     func loadStyling() async {
         guard let latest: [Styling] = try? await send("/api/import/plans/styling") else { return }
+        let before = planningDates
         styling = latest
         let working = Set(latest.filter { $0.status == "working" }.map(\.date))
-        let done = planning.keys.filter { !working.contains($0) }
-        for date in done { planning[date] = nil }
-        if !done.isEmpty { await loadPlans() }
+        for date in planning.keys where !working.contains(date) && !startingPlans.contains(date) { planning[date] = nil }
+        // Any day that stopped being styled has a new outfit (or failed); either way the plans changed.
+        if !before.subtracting(planningDates).isEmpty { await loadPlans() }
         if let failed = latest.first(where: { $0.status == "failed" }) {
             error = "Couldn't style \(Day.date(failed.date).formatted(.dateTime.weekday(.wide))): \(failed.error ?? "try again.")"
             for entry in latest where entry.status == "failed" {
