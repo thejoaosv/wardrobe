@@ -10,8 +10,10 @@ nonisolated struct Item: Codable, Identifiable, Hashable {
     var secondaryColor: String?
     /// What a stylist needs to know: fabric, fit, warmth, formality.
     var description: String?
-    /// Exact printed or embroidered text, with placement; empty when there is none.
+    /// Exact printed or embroidered text on the front, with placement; empty when there is none.
     var text: String?
+    /// The same for the back, filled in when a back photo is added.
+    var backText: String?
     var tags: [String]?
     var image: String?
     var modeledImage: String?
@@ -34,6 +36,10 @@ nonisolated struct Plan: Codable, Identifiable, Hashable {
     let date: String
     var style: String
     var weather: String?
+    var palette: String?
+    /// A piece the outfit was built around.
+    var include: String?
+    var note: String?
     var name: String
     var garmentIds: [String]
     var reason: String
@@ -102,7 +108,23 @@ nonisolated struct Styling: Codable, Hashable {
     var error: String?
 }
 
-struct PlanDay: Hashable { var date: Date; var style: String; var weather = "auto"; var replace: String? = nil }
+struct PlanDay: Hashable {
+    var date: Date
+    var style: String
+    var weather = "auto"
+    var palette = "any"
+    var include: String? = nil
+    var note = ""
+    var replace: String? = nil
+}
+
+extension PlanDay {
+    /// Restyles a planned day with the same choices; replace swaps just that piece.
+    init(_ plan: Plan, replace: String? = nil) {
+        self.init(date: Day.date(plan.date), style: plan.style, weather: plan.weather ?? "auto", palette: plan.palette ?? "any",
+                  include: replace == nil ? plan.include : nil, note: plan.note ?? "", replace: replace)
+    }
+}
 
 nonisolated enum Parts {
     static let order = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"]
@@ -145,7 +167,7 @@ final class Store {
     /// Changes when the photo of the user is replaced, so its preview reloads.
     var referenceStamp = Date.now
     /// The oldest server API this app works with; see API_VERSION in scripts/import-job-api.mjs.
-    static let minimumServerAPI = 5
+    static let minimumServerAPI = 6
     var serverIsOutdated: Bool { config != nil && (version?.api ?? 0) < Self.minimumServerAPI }
     var error: String?
     /// Open sheets; while one is up, it shows errors itself, because an alert on the root view would close it.
@@ -291,7 +313,7 @@ final class Store {
     /// Saves edited details; the server normalizes them and returns the stored piece.
     func update(_ item: Item) async {
         await run {
-            var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? [], "description": item.description ?? "", "text": item.text ?? ""]
+            var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? [], "description": item.description ?? "", "text": item.text ?? "", "backText": item.backText ?? ""]
             body["color"] = item.color
             body["secondaryColor"] = item.secondaryColor ?? NSNull()
             body["wears"] = item.wears ?? NSNull()
@@ -340,8 +362,9 @@ final class Store {
         for day in days { planning[Day.string(day.date)] = day }
         await run {
             let body = days.map { day in
-                var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather]
+                var entry = ["date": Day.string(day.date), "style": day.style, "weather": day.weather, "palette": day.palette, "note": day.note]
                 entry["replace"] = day.replace
+                entry["include"] = day.include
                 return entry
             }
             styling = try await send("/api/import/plans", method: "POST", body: ["days": body, "background": true])
