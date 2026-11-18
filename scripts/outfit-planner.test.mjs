@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
-import { buildTryOnPrompt, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
+import { IMAGE_INPUT_LIMIT, buildTryOnPrompt, garmentSheet, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
 import { pickModels } from "./openai-provider.mjs";
 import { duplicateCombos, historyFor, includeIssues, layerIssues, pairIssues, planIssues, repeatedGarments, restyleIssues, rotationIssues, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
@@ -87,15 +87,20 @@ test("hasTransparentBackground tells real alpha from a chroma backdrop", async (
   assert.equal(await hasTransparentBackground(keyed), false);
 });
 
-test("try-on references back cutouts and turns the pose when a piece has one", () => {
-  const plan = { name: "Rugby Street", style: "Streetwear" };
-  const front = [{ name: "Rugby shirt", part: "upperbody", image: "/a.png" }, { name: "Jeans", part: "lowerbody", image: "/b.png" }];
-  assert.match(buildTryOnPrompt(plan, front), /mostly front-facing/);
-  const withBack = [{ ...front[0], backImage: "/a-back.png" }, front[1]];
-  assert.deepEqual(tryOnReferences(withBack).map((ref) => `${ref.item.name}:${ref.side}`), ["Rugby shirt:front", "Rugby shirt:back", "Jeans:front"]);
-  const prompt = buildTryOnPrompt(plan, withBack);
-  assert.match(prompt, /Image 3: exact base top reference \(Rugby shirt\), back view/);
-  assert.match(prompt, /three-quarter back view.*back of Rugby shirt/);
+test("try-ons edit the user's photo with front cutouts, keeping their pose", () => {
+  const plan = { name: "Rugby Street", style: "Streetwear", weather: "rain" };
+  const garments = [{ name: "Rugby shirt", part: "upperbody", image: "/a.png", backImage: "/a-back.png", text: 'chest: small "RUGBY"' }, { name: "Jeans", part: "lowerbody", image: "/b.png" }];
+  // A back photo no longer turns the pose or adds an image.
+  assert.deepEqual(tryOnReferences(garments).map((ref) => `${ref.item.name}:${ref.side}`), ["Rugby shirt:front", "Jeans:front"]);
+  const prompt = buildTryOnPrompt(plan, garments);
+  assert.match(prompt, /Edit Image 1/);
+  assert.match(prompt, /same pose/);
+  assert.match(prompt, /Image 2: exact base top \(Rugby shirt\)\. Its text reads: chest: small "RUGBY"/);
+  assert.doesNotMatch(prompt, /back view of/);
+  // With a face close-up as Image 2, the garments move up one.
+  const withFace = buildTryOnPrompt(plan, garments, { face: true });
+  assert.match(withFace, /Image 2: a close-up of the same person's head/);
+  assert.match(withFace, /Image 3: exact base top \(Rugby shirt\)/);
 });
 
 test("layerIssues follows the weather only when the wardrobe allows it", () => {
@@ -152,4 +157,19 @@ test("a restyle must not return to a seen outfit or change just one piece", () =
   // Close to the older outfit counts too, not only the current one.
   assert.match(restyleIssues(days, [plan("2026-11-19", ["shirt", "chinos", "hoodie"])], closet)[0] ?? "", /only 1 piece/);
   assert.deepEqual(restyleIssues([{ date: "2026-11-19", avoid: [["tee", "jeans", "hoodie"]] }], [plan("2026-11-19", ["shirt", "chinos", "hoodie"])], closet), []);
+});
+
+test("too many garments for the image tool share one numbered sheet", async () => {
+  const plan = { name: "Layers", style: "Casual", weather: "cold" };
+  const garments = ["upperbody", "midlayer", "lowerbody", "shoes"].map((part) => ({ name: part, part, image: `/${part}.png` }));
+  // Photo, face close-up and four cutouts would be six inputs.
+  assert.ok(2 + garments.length > IMAGE_INPUT_LIMIT);
+  const prompt = buildTryOnPrompt(plan, garments, { face: true, sheet: true });
+  assert.match(prompt, /Image 3: a reference sheet with every garment/);
+  assert.match(prompt, /4\. exact shoes \(shoes\)/);
+  assert.doesNotMatch(prompt, /Image 4/);
+  const square = await sharp({ create: { width: 200, height: 300, channels: 4, background: "#ff000080" } }).png().toBuffer();
+  const sheet = await sharp(await garmentSheet([square, square, square, square])).metadata();
+  assert.deepEqual([sheet.width, sheet.height], [1536, 1536]);
+  assert.deepEqual(await sharp(await garmentSheet(Array(5).fill(square))).metadata().then((m) => [m.width, m.height]), [2304, 1536]);
 });

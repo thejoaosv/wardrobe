@@ -322,53 +322,63 @@ export async function hasTransparentBackground(bytes) {
   return clear / data.length >= 0.05 && corners.every((index) => data[index] <= 8);
 }
 
+// The garments' cutouts on one light sheet, numbered in reading order, for when separate images would pass the input limit.
+export async function garmentSheet(cutouts) {
+  const columns = cutouts.length <= 4 ? 2 : 3;
+  const cell = 768;
+  const rows = Math.ceil(cutouts.length / columns);
+  const tiles = await Promise.all(cutouts.map(async (bytes, index) => {
+    const image = await sharp(bytes).resize(cell - 120, cell - 120, { fit: "inside" }).png().toBuffer();
+    const { width, height } = await sharp(image).metadata();
+    const label = Buffer.from(`<svg width="96" height="96"><circle cx="48" cy="48" r="34" fill="#222"/><text x="48" y="62" font-size="40" font-family="Helvetica" font-weight="bold" fill="#fff" text-anchor="middle">${index + 1}</text></svg>`);
+    const left = (index % columns) * cell, top = Math.floor(index / columns) * cell;
+    return [{ input: image, left: left + Math.round((cell - width) / 2), top: top + Math.round((cell - height) / 2) }, { input: label, left: left + 12, top: top + 12 }];
+  }));
+  return sharp({ create: { width: columns * cell, height: rows * cell, channels: 3, background: "#ededed" } }).composite(tiles.flat()).png().toBuffer();
+}
+
 const PART_NAMES = { upperbody: "base top", midlayer: "mid layer", wholebody_up: "outer layer", lowerbody: "bottom", shoes: "shoes", accessories_up: "accessory" };
 
-// Adapted from the generate-outfits skill template: one portrait of the user in exactly these garments.
-// Reference images after the identity photo: each garment's front cutout, then its back cutout when it has one.
+// Try-ons edit the user's own photo: their pose and face stay, only the clothes and the scene change. Regenerating them
+// in a new pose (as a back view once did) loses who they are, so each garment is referenced by its front cutout only.
 export function tryOnReferences(garments) {
-  return garments.flatMap((item) => [{ item, side: "front", image: item.image }, ...(item.backImage ? [{ item, side: "back", image: item.backImage }] : [])]);
+  return garments.map((item) => ({ item, side: "front", image: item.image }));
 }
 
 const LAYER_ORDER = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"];
 const SCENES = { warm: "a sunny, warm day outdoors", mild: "a bright, mild day", cold: "a crisp, cold day with soft winter light", rain: "an overcast, rainy-looking day on damp pavement, without rain drops on the lens" };
 
-export function buildTryOnPrompt(plan, garments) {
-  const refs = tryOnReferences(garments);
-  const references = refs.map(({ item, side }, index) => {
-    const text = side === "front" ? item.text : item.backText;
-    return `Image ${index + 2}: exact ${PART_NAMES[item.part] || "garment"} reference (${item.name}), ${side} view.${text ? ` Its ${side} text reads: ${text}.` : ""}`;
-  }).join("\n");
-  const backs = refs.filter((ref) => ref.side === "back").map((ref) => ref.item.name);
+// Codex's image tool takes at most this many input images; beyond it, the garments share one numbered sheet.
+export const IMAGE_INPUT_LIMIT = 5;
+
+// face adds a close-up of the user's head as Image 2, so the garments start at Image 3; sheet puts them all in one image.
+export function buildTryOnPrompt(plan, garments, { face = false, sheet = false } = {}) {
+  const first = face ? 3 : 2;
+  const describe = (item) => `exact ${PART_NAMES[item.part] || "garment"} (${item.name}).${item.text ? ` Its text reads: ${item.text}.` : ""}`;
+  const references = sheet
+    ? `Image ${first}: a reference sheet with every garment, each numbered in its corner:\n${garments.map((item, index) => `${index + 1}. ${describe(item)}`).join("\n")}`
+    : tryOnReferences(garments).map(({ item }, index) => `Image ${index + first}: ${describe(item)}`).join("\n");
   const worn = [...garments].sort((a, b) => LAYER_ORDER.indexOf(a.part) - LAYER_ORDER.indexOf(b.part))
     .map((item) => `${PART_NAMES[item.part] || "garment"}: ${item.name}`).join("; ");
-  const composition = backs.length
-    ? `Full body from head to shoes, centered. Pose the person in a natural three-quarter back view, turned about 135 degrees away from the camera and glancing back over the shoulder, so the back of ${backs.join(" and ")} is clearly visible while the face stays recognizable and the front of the outfit is still partly readable.`
-    : "Full body from head to shoes with a little space above and below, centered, relaxed mostly front-facing pose with arms slightly away from the torso so every garment stays readable.";
   const layered = garments.some((item) => item.part === "wholebody_up" || item.part === "midlayer")
-    ? "\nLayering: wear the layers in order, base top innermost, then the mid layer, then the outer layer, so each stays identifiable (a collar or hem of the inner layer may show). Only open a layer if its reference shows a real full front zipper or buttons; never invent a closure."
+    ? "\nLayering: base top innermost, then the mid layer, then the outer layer. The base top shows naturally a little at the neckline or below the hem of the layer over it. Only open a layer if its reference has a real full front zipper or buttons; never invent a closure."
     : "";
-  return `Use case: identity-preserve
+  return `Use case: identity-preserving clothing edit
 Asset type: vertical outfit try-on photograph
 
-Image 1: the person to dress. Use it only for who they are: face, hair, glasses if worn, skin, age, build and body proportions. Ignore the clothes, shoes and accessories they wear in Image 1; none of them may appear in the result.
-The other images are product cutouts of the exact garments to wear, laid flat on a transparent background:
+Image 1: a photo of the user. This is the photo to edit.${face ? "\nImage 2: a close-up of the same person's head from Image 1, the authority for their face, hair and glasses." : ""}
+${sheet ? "The last image holds" : "The remaining images are"} product cutouts of the exact garments to put on them:
 ${references}
 
-Primary request: Create a photorealistic vertical 2:3 fashion photograph of the person from Image 1 wearing exactly this outfit and nothing else: ${worn}.
+Edit Image 1: replace everything the person wears, including any shoes, watch, wristband and anything they hold, with exactly this outfit and nothing else: ${worn}. Replace the background with ${SCENES[plan.weather] || "a softly lit, real-world setting"} that suits a ${plan.style} outfit, simple and softly out of focus.
 
-Outfit: ${plan.name} (${plan.style}).
-Scene: ${SCENES[plan.weather] || "a softly lit, real-world setting"} that suits a ${plan.style} outfit. Natural light, true-to-life colors, the background simple and out of focus so the outfit stands out.
+Keep the person exactly as they are in Image 1: the same face and features, hair color, length and style, glasses, skin, age, height and build, and the same pose, camera angle and full-body framing from head to shoes, facing the camera. This must be unmistakably the same real person, not a lookalike: do not beautify, slim, de-age or restyle their hair. ${garments.some((item) => item.part === "shoes") ? "" : "Plain understated shoes replace theirs because no shoe reference is provided. "}Hands hang relaxed and empty.${layered}
 
-Subject: Preserve the person's recognizable face, hair, glasses if worn, age, build, skin texture and body proportions. ${garments.some((item) => item.part === "shoes") ? "" : "Plain understated shoes are allowed because no shoe reference is provided. "}Do not add, replace or invent any other visible clothing or accessory.${layered}
+Garment fidelity: each garment matches its cutout exactly: color, material, fit, construction, pattern, graphics, logos, proportions and closures, worn with natural drape and creases on this body. Text reads letter for letter as listed; never swap in a different or more familiar word or symbol.
 
-Composition: ${composition}
+Realism: one real camera photograph with natural light, true-to-life colors, natural skin texture and believable fabric; the lighting on the person matches the new scene.
 
-Garment fidelity: Each garment must match its cutout exactly: color, material, fit, construction, pattern, graphics, logos, proportions and closures, worn with natural drape and creases on a real body. Text must read letter for letter as listed; never swap in a different or more familiar word.
-
-Realism: a real camera photograph with natural skin texture, believable fabric, correct hands and feet.
-
-Avoid: hidden or redesigned garments, changed logos or text, the clothes from Image 1, extra layers, hats, bags or jewelry that were not referenced, crossed arms, cropped head or feet, extra people, text overlays, watermarks, studio cutout look, or synthetic AI polish.`;
+Avoid: a different face or hairstyle, a new pose or back view, any of the original clothes, shoes or accessories from Image 1, hidden or redesigned garments, changed logos or text, extra layers, hats, bags or jewelry, cropped head or feet, extra people, text overlays, watermarks, a studio cutout look, or synthetic AI polish.`;
 }
 
 async function atomicJson(file, value) {
@@ -395,6 +405,7 @@ const ANALYZE_PROMPT = `Identify every distinct wearable clothing item visible i
 const ANALYZE_SCHEMA = { type: "object", additionalProperties: false, properties: { items: { type: "array", minItems: 0, maxItems: 8, items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, part: { type: "string", enum: [...PARTS] }, color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, secondaryColor: { anyOf: [{ type: "string", pattern: "^#[0-9A-Fa-f]{6}$" }, { type: "null" }] }, description: { type: "string" }, text: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, boundingBox: { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] } }, required: ["name", "part", "color", "secondaryColor", "description", "text", "tags", "boundingBox"] } } }, required: ["items"] };
 
 const HEX = { type: "string", pattern: "^#[0-9A-Fa-f]{6}$" };
+const FACE_SCHEMA = { type: "object", additionalProperties: false, properties: { x: { type: "integer", minimum: 0, maximum: 999 }, y: { type: "integer", minimum: 0, maximum: 999 }, width: { type: "integer", minimum: 1, maximum: 1000 }, height: { type: "integer", minimum: 1, maximum: 1000 } }, required: ["x", "y", "width", "height"] };
 const DETAILS_SCHEMA = { type: "object", additionalProperties: false, properties: { description: { type: "string" }, text: { type: "string" }, backText: { type: "string" }, tags: { type: "array", items: { type: "string" }, maxItems: 4 }, color: HEX, secondaryColor: { anyOf: [HEX, { type: "null" }] } }, required: ["description", "text", "backText", "tags", "color", "secondaryColor"] };
 
 // Re-reads a piece's details from both sides once it has a back: colors, a description covering both, and each side's text.
@@ -784,6 +795,33 @@ export function wardrobeImportApi(options = {}) {
     }
   }
 
+  // A close-up of the user's head from the reference photo, where the face is often small; cached until the photo changes.
+  // null when the AI can't find a face, and try-ons go on without it.
+  async function readFaceReference(reference) {
+    const modelPath = path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png"));
+    const facePath = modelPath.replace(/(\.[a-z]+)?$/i, "-face.png");
+    const [photo, cached] = await Promise.all([stat(modelPath), stat(facePath).catch(() => null)]);
+    if (cached && cached.mtimeMs >= photo.mtimeMs) return readFile(facePath);
+    try {
+      const source = await sharp(reference).rotate().png().toBuffer();
+      const { width, height } = await sharp(source).metadata();
+      const box = await ai.json({ kind: "vision", schema: FACE_SCHEMA, images: [await sharp(source).resize(1024, 1024, { fit: "inside" }).png().toBuffer()],
+        prompt: "Find the main person's head in this photo. Return a tight box around the whole head: hair, ears, glasses and chin. Use integers normalized to a 1000 by 1000 image: x and y are the top-left corner, then width and height." });
+      // Room around the head for the neck and hair, kept square.
+      const side = Math.max(box.width * width, box.height * height) / 1000 * 1.6;
+      const left = Math.max(0, Math.round((box.x + box.width / 2) * width / 1000 - side / 2));
+      const top = Math.max(0, Math.round((box.y + box.height / 2) * height / 1000 - side / 2));
+      const size = Math.round(Math.min(side, width - left, height - top));
+      if (size < 32) return null;
+      const face = await sharp(source).extract({ left, top, width: size, height: size }).resize(768, 768, { kernel: "lanczos3" }).png().toBuffer();
+      await writeFile(facePath, face);
+      return face;
+    } catch (error) {
+      console.warn(`Couldn't crop the face from the reference photo: ${error.message}`);
+      return null;
+    }
+  }
+
   const removeOutfitImage = (image) => image && rm(path.join(outfitDir, path.basename(image)), { force: true });
 
   // Saves try-on progress only if the plan still has the same garments; a restyle discards stale results.
@@ -815,18 +853,18 @@ export function wardrobeImportApi(options = {}) {
       const status = `tryon:${date}`;
       const task = queued(status, async () => {
         try {
-          const images = [{ data: reference, role: "identity reference: the exact person to dress" }];
-          for (const { item, side, image } of tryOnReferences(garments)) {
-            images.push({ data: await readFile(libraryFile(image)), role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name}, ${side} view (transparent cutout)` });
-          }
+          const face = await readFaceReference(reference);
+          const images = [{ data: reference, role: "identity reference: the exact person to dress" }, ...(face ? [{ data: face, role: "identity close-up: the same person's face and hair" }] : [])];
+          const cutouts = await Promise.all(tryOnReferences(garments).map(({ image }) => readFile(libraryFile(image))));
+          const sheet = images.length + cutouts.length > IMAGE_INPUT_LIMIT;
+          if (sheet) images.push({ data: await garmentSheet(cutouts), role: "reference sheet of every garment to wear, numbered" });
+          else garments.forEach((item, index) => images.push({ data: cutouts[index], role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name} (transparent cutout)` }));
           const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
-          // In a back view the front text isn't readable, so only a front-facing try-on is held to it.
-          const facing = !garments.some((item) => item.backImage);
-          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: facing ? item.text : "", image: await readFile(libraryFile(item.image)) })));
+          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: item.text, image: await readFile(libraryFile(item.image)) })));
           const { result: bytes, problems } = await reviewed({
             attempts: TRY_ON_ATTEMPTS,
-            make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments), feedback) }),
-            check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: reference, image, garments: worn }); },
+            make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments, { face: Boolean(face), sheet }), feedback) }),
+            check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: reference, face, image, garments: worn }); },
             onRetry: retrying(status, TRY_ON_ATTEMPTS),
           });
           await mkdir(outfitDir, { recursive: true });

@@ -90,19 +90,21 @@ pass is true only when none apply. problems lists each failure as a short instru
 }
 
 // Checks a photo of the user wearing garments: same person, every garment present and faithful, nothing extra.
-export async function reviewWorn(ai, { person, image, garments }) {
-  const references = garments.map((garment, index) => `Image ${index + 3}: ${garment.name}${garment.text ? `, text: ${garment.text}` : ""}`).join("\n");
+// face is an optional close-up of the user's head, shown after the full photo.
+export async function reviewWorn(ai, { person, face, image, garments }) {
+  const output = face ? 3 : 2;
+  const references = garments.map((garment, index) => `Image ${index + output + 1}: ${garment.name}${garment.text ? `, text: ${garment.text}` : ""}`).join("\n");
   const verdict = await review(ai, {
-    images: [await preview(person), await preview(image), ...await Promise.all(garments.map((garment) => preview(garment.image)))],
+    images: [await preview(person), ...(face ? [await preview(face)] : []), await preview(image), ...await Promise.all(garments.map((garment) => preview(garment.image)))],
     schema: VERDICT,
     prompt: `You are a strict quality reviewer for a wardrobe app.
-Image 1 is the user. Image 2 is a generated photo that must show this same person wearing exactly the garments in the reference images:
+Image 1 is the user${face ? " and Image 2 a close-up of their head" : ""}. Image ${output} is a generated photo that must show this same person wearing exactly the garments in the reference images:
 ${references}
 
-Fail Image 2 if any of these is true:
-1. The person is not recognizably the same as Image 1 (face, hair, build), or there is more than one person.
-2. A referenced garment is missing, hidden, or changed in type, color, pattern or fit.
-3. Prominent text or graphics differ from their reference: chest graphics, slogans and large logos, the things readable in a full-length photo. Transcribe that text from the references into sourceText and from Image 2 into outputText; a changed word is a failure. Ignore small logos, patches and labels that can't be read at this scale.
+Fail Image ${output} if any of these is true:
+1. The person is clearly someone else: a different face shape or features, different hair color, length or style, glasses added or missing, or a different age or build. Lighting, expression, pose and a little softness are fine. Or there is more than one person.
+2. A referenced garment is missing or changed in type, color, pattern or fit. A base top under a hoodie, sweater or jacket is naturally covered: it only needs to show a little at the neckline or hem, or may be fully hidden, and its graphics are not judged.
+3. Prominent text or graphics on the visible outer layers differ from their reference: chest graphics, slogans and large logos, the things readable in a full-length photo. Transcribe that text from the references into sourceText and from Image ${output} into outputText; a changed word is a failure. Ignore small logos, patches and labels that can't be read at this scale.
 4. An unreferenced visible garment, hat, bag or accessory was added (plain shoes are fine when no shoes are referenced).
 5. The body is cropped, distorted, or has broken anatomy such as extra fingers or limbs.
 

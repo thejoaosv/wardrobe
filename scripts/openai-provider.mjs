@@ -205,7 +205,7 @@ ${inputs}` : "Call your built-in image_gen tool exactly once to generate a new i
 
 Output: exactly one ${shape} PNG${transparent ? " with a genuinely transparent background. Ask image_gen for transparency and keep its alpha channel" : ""}.
 
-Brief:
+Pass this brief to image_gen as its prompt word for word. Do not shorten, summarize or reword it:
 ${prompt}
 
 Then copy the generated PNG to ./output.png in the current directory. Do nothing else. Reply only with "done".`,
