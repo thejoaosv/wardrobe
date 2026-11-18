@@ -39,7 +39,10 @@ struct WardrobeApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background, store.hasPendingWork, let base = store.baseURL {
-                        Notifier.shared.arm(base: base)
+                        // A second back so a result that lands as the app leaves isn't missed by the Mac's whole-second clock reading.
+                        let since = Date.now.addingTimeInterval(store.serverClockOffset - 1)
+                        let reviews = store.reviewCount
+                        Task { await withBackgroundTime("arm-wait") { await Notifier.shared.arm(base: base, since: since, reviews: reviews) } }
                     } else if phase == .active {
                         Task { await store.refresh() }
                     }
@@ -133,10 +136,11 @@ private struct AddSheet: View {
 
     var body: some View {
         NavigationStack {
-            // Both stay alive so switching back keeps picked styles and running imports.
+            // The plan form stays alive so switching back keeps picked styles; imports live in the store, and the
+            // import form's looping skeletons shouldn't keep animating out of sight.
             ZStack {
                 PlanForm().opacity(mode == .plan ? 1 : 0).allowsHitTesting(mode == .plan).accessibilityHidden(mode != .plan)
-                ImportForm().opacity(mode == .clothes ? 1 : 0).allowsHitTesting(mode == .clothes).accessibilityHidden(mode != .clothes)
+                if mode == .clothes { ImportForm().transition(.opacity) }
             }
             .animation(.easeInOut(duration: 0.2), value: mode)
             .navigationBarTitleDisplayMode(.inline)

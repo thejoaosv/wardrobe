@@ -169,7 +169,7 @@ private struct PhotoPage: View {
 
     var body: some View {
         Page(title: "Photo of you") {
-            AsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)", width: 900) : nil) { phase in
+            RetryingAsyncImage(url: store.config?.hasModelReference == true ? store.url("/api/import/model-reference?v=\(store.referenceStamp.timeIntervalSince1970)", width: 900) : nil) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFill() } else {
                     Image(systemName: "person.crop.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.muted)
                 }
@@ -195,14 +195,16 @@ private struct PhotoPage: View {
             guard let item else { return }
             pick = nil
             Task {
-                guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
+                guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = await uploadJPEG(data) else { return }
                 await store.uploadModelReference(jpeg)
             }
         }
         .fullScreenCover(isPresented: $taking) {
             CameraPicker { photo in
-                guard let jpeg = uploadJPEG(photo) else { return }
-                Task { await store.uploadModelReference(jpeg) }
+                Task {
+                    guard let jpeg = await uploadJPEG(photo) else { return }
+                    await store.uploadModelReference(jpeg)
+                }
             }
             .ignoresSafeArea()
         }

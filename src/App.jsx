@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Plus, Trash, X } from "@phosphor-icons/react";
-import { WardrobeImportFlow } from "./import-flow.jsx";
+import { WardrobeImportFlow, api } from "./import-flow.jsx";
 import { OptimizedImage } from "./OptimizedImage.jsx";
 
 const STORAGE_KEY = "open-wardrobe-edits-v1";
@@ -29,22 +29,30 @@ function readEdits() {
 }
 
 
-function persistEdit(item) {
-  const edits = readEdits();
-  edits[item.id] = {
-    name: item.name || "",
-    part: item.part,
-    color: item.color || null,
-    secondaryColor: item.secondaryColor || null,
-    tags: item.tags || [],
-  };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(edits));
-}
-
-function removePersistedEdit(id) {
+function forgetEdit(id) {
   const edits = readEdits();
   delete edits[id];
   localStorage.setItem(STORAGE_KEY, JSON.stringify(edits));
+}
+
+// Edits used to stay in this browser only, hidden from the phone and the stylist. Each one is sent to the Mac once,
+// only for fields that still differ, then forgotten; one that can't be sent yet waits for the next load.
+async function pushSavedEdits(items) {
+  let next = items;
+  for (const [id, edit] of Object.entries(readEdits())) {
+    const item = items.find((candidate) => candidate.id === id);
+    const changed = item && Object.fromEntries(Object.entries(edit).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(item[key] ?? null)));
+    if (!item || !Object.keys(changed).length) { forgetEdit(id); continue; }
+    try {
+      const saved = await api(`/api/import/wardrobe/${id}`, { method: "PATCH", body: JSON.stringify(changed) });
+      next = next.map((candidate) => candidate.id === id ? saved : candidate);
+      forgetEdit(id);
+    } catch (requestError) {
+      // A network failure (TypeError) is worth another try; a refusal from the Mac isn't.
+      if (!(requestError instanceof TypeError)) forgetEdit(id);
+    }
+  }
+  return next;
 }
 
 function readDeletedItems() {
@@ -386,6 +394,16 @@ function ItemViewer({ item, onClose, onSave, onDelete }) {
     else onClose();
   }, [isDirty, nudgeUnsaved, onClose]);
 
+  // Once per opening: rerunning this as the draft changed moved focus off the field being typed in.
+  useEffect(() => {
+    document.body.classList.add("viewer-open");
+    closeButtonRef.current?.focus({ preventScroll: true });
+    return () => {
+      document.body.classList.remove("viewer-open");
+      clearTimeout(shakeTimerRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Escape") {
@@ -393,15 +411,8 @@ function ItemViewer({ item, onClose, onSave, onDelete }) {
         else requestClose();
       }
     };
-
     document.addEventListener("keydown", onKeyDown);
-    document.body.classList.add("viewer-open");
-    closeButtonRef.current?.focus({ preventScroll: true });
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.body.classList.remove("viewer-open");
-      clearTimeout(shakeTimerRef.current);
-    };
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [requestClose, sampling]);
 
   useEffect(() => {
@@ -422,10 +433,14 @@ function ItemViewer({ item, onClose, onSave, onDelete }) {
     onClose();
   };
 
-  const saveEditing = () => {
-    onSave({ ...item, ...draft, name: draft.name.trim(), tags: draft.tags.map((tag) => tag.trim()).filter(Boolean) });
+  const saveEditing = async () => {
     setSampling(null);
-    setSampleStatus("Changes saved.");
+    try {
+      await onSave({ ...draft, id: item.id, name: draft.name.trim(), tags: draft.tags.map((tag) => tag.trim()).filter(Boolean) });
+      setSampleStatus("Changes saved.");
+    } catch (requestError) {
+      setSampleStatus(requestError.message);
+    }
   };
 
   const handleImageLoad = (event) => {
@@ -541,19 +556,20 @@ export function App() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     fetch("/api/import/wardrobe", { cache: "no-store" })
       .then((response) => {
         if (!response.ok) throw new Error("Could not load the wardrobe.");
         return response.json();
       })
       .then((loadedItems) => {
-        const edits = readEdits();
         const deleted = readDeletedItems();
-        const visibleItems = loadedItems.filter((item) => !deleted.has(item.id));
-        setItems(visibleItems.map((item) => ({ ...item, ...(edits[item.id] || {}) })));
+        return pushSavedEdits(loadedItems.filter((item) => !deleted.has(item.id)));
       })
-      .catch((requestError) => setError(requestError.message))
-      .finally(() => setLoading(false));
+      .then((visibleItems) => { if (!cancelled) setItems(visibleItems); })
+      .catch((requestError) => { if (!cancelled) setError(requestError.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const selectedItem = items.find((item) => item.id === selectedId) || null;
@@ -574,23 +590,25 @@ export function App() {
     setSelectedId(null);
   };
 
-  const saveItem = (updatedItem) => {
-    setItems((current) => current.map((item) => item.id === updatedItem.id ? updatedItem : item));
-    persistEdit(updatedItem);
+  // Saved on the Mac, which normalizes the details and returns the stored piece.
+  const saveItem = async ({ id, name, part, color, secondaryColor, tags }) => {
+    const saved = await api(`/api/import/wardrobe/${id}`, { method: "PATCH", body: JSON.stringify({ name, part, color, secondaryColor: secondaryColor || null, tags }) });
+    setItems((current) => current.map((item) => item.id === saved.id ? saved : item));
   };
 
   const deleteItem = async (id) => {
     if (id.startsWith("import-")) {
       try {
-        const response = await fetch(`/api/import/wardrobe/${id}`, { method: "DELETE" });
-        if (!response.ok && response.status !== 404) throw new Error("Could not delete the imported item.");
+        await api(`/api/import/wardrobe/${id}`, { method: "DELETE" });
       } catch (requestError) {
-        setError(requestError.message);
-        return;
+        if (requestError.status !== 404) {
+          setError(requestError.status ? requestError.message : "Could not delete the imported item.");
+          return;
+        }
       }
     }
     setItems((current) => current.filter((item) => item.id !== id));
-    removePersistedEdit(id);
+    forgetEdit(id);
     persistDeletedItem(id);
     setSelectedId(null);
   };

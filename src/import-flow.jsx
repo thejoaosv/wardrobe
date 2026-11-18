@@ -21,13 +21,39 @@ const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   reader.readAsDataURL(file);
 });
 
-async function api(path, options) {
+// The server never needs more than 2048px, and a full-size photo can pass its upload limit.
+async function uploadDataUrl(file) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return fileToDataUrl(file); }
+  const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const context = canvas.getContext("2d");
+  // JPEG has no transparency; white reads as an empty background instead of black.
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+// randomUUID needs a secure context, which a Mac reached by its .local name over plain HTTP isn't.
+const clientId = () => globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+
+const isVisibleJob = (job) => job.status !== "complete" && job.stages?.crop?.status !== "rejected" && job.stages?.garment?.status !== "rejected" && job.stages?.modeled?.status !== "rejected";
+const isWorkingJob = (job) => (job.stages?.crop?.status === "approved" && ["processing", "pending", "queued"].includes(job.stages?.garment?.status)) || ["processing", "queued"].includes(job.stages?.modeled?.status) || (job.stages?.garment?.status === "approved" && job.stages?.modeled?.status === "pending");
+
+export async function api(path, options = {}) {
+  const method = options.method || "GET";
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
+    // The server only accepts changes sent as JSON, even ones without a body.
+    body: method === "GET" ? options.body : options.body ?? "{}",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(value.error || "The import job could not be updated.");
+  if (!response.ok) throw Object.assign(new Error(value.error || "The import job could not be updated."), { status: response.status });
   return value;
 }
 
@@ -147,31 +173,54 @@ export function WardrobeImportFlow({ onGarmentApproved, onModeledApproved }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState(null);
   const [setup, setSetup] = useState(null);
+  // Photos the Mac is searching for clothes in the background: detection id to file name.
+  const [searching, setSearching] = useState({});
+  const searchingRef = useRef(searching);
+  searchingRef.current = searching;
+
+  const applyJobs = useCallback((storedJobs) => {
+    const visibleJobs = storedJobs.filter(isVisibleJob);
+    setJobs(visibleJobs);
+    setDrafts((current) => Object.fromEntries(visibleJobs.map((job) => [job.id, current[job.id] || defaultDraft(job)])));
+  }, []);
 
   useEffect(() => {
     api(CONFIG_API).then(setSetup).catch((requestError) => setSetup({ ready: false, error: requestError.message }));
-    api(API)
-      .then((storedJobs) => {
-        const visibleJobs = storedJobs.filter((job) => job.status !== "complete" && job.stages?.crop?.status !== "rejected" && job.stages?.garment?.status !== "rejected" && job.stages?.modeled?.status !== "rejected");
-        setJobs(visibleJobs);
-        setDrafts(Object.fromEntries(visibleJobs.map((job) => [job.id, defaultDraft(job)])));
-      })
-      .catch(() => {});
-  }, []);
+    api(API).then(applyJobs).catch(() => {});
+  }, [applyJobs]);
 
-  const refresh = useCallback(async (id) => {
-    try {
-      const next = await api(`${API}/${id}`);
-      setJobs((current) => current.map((job) => job.id === id ? next : job));
-      setDrafts((current) => current[id] ? current : { ...current, [id]: defaultDraft(next) });
-    } catch (requestError) { setError(requestError.message); }
-  }, []);
-
+  // While photos are searched or pieces generated, one look at the lists every couple of seconds, each after the last answers.
+  const working = Object.keys(searching).length > 0 || jobs.some(isWorkingJob);
   useEffect(() => {
-    if (!jobs.some((job) => (job.stages?.crop?.status === "approved" && ["processing", "pending", "queued"].includes(job.stages?.garment?.status)) || ["processing", "queued"].includes(job.stages?.modeled?.status) || (job.stages?.garment?.status === "approved" && job.stages?.modeled?.status === "pending"))) return undefined;
-    const timer = setInterval(() => jobs.forEach((job) => refresh(job.id)), 900);
-    return () => clearInterval(timer);
-  }, [jobs, refresh]);
+    if (!working) return undefined;
+    let cancelled = false;
+    let timer;
+    const tick = async () => {
+      try {
+        const pending = searchingRef.current;
+        if (Object.keys(pending).length) {
+          const detections = await api("/api/import/detections");
+          // One missing from the list finished and found pieces a while ago.
+          const finished = Object.keys(pending).map((id) => detections.find((detection) => detection.id === id) || { id, status: "done", found: 1 }).filter((detection) => detection.status !== "working");
+          if (cancelled) return;
+          if (finished.length) {
+            setSearching((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !finished.some((detection) => detection.id === id))));
+            for (const detection of finished) {
+              if (detection.status === "failed") setError(detection.error || `Couldn’t read ${pending[detection.id]}.`);
+              else if (!detection.found) { setNotice({ tone: "complete", text: "No clothing detected", detail: `We couldn’t find a distinct wearable item in ${pending[detection.id]}. Try a clearer or more tightly framed image.` }); setOpen(true); }
+              // Shown here, so the phone doesn't show it again.
+              if (detection.status === "failed" || !detection.found) api(`/api/import/detections/${detection.id}`, { method: "DELETE" }).catch(() => {});
+            }
+          }
+        }
+        const storedJobs = await api(API);
+        if (!cancelled) applyJobs(storedJobs);
+      } catch (requestError) { if (!cancelled) setError(requestError.message); }
+      if (!cancelled) timer = setTimeout(tick, 1500);
+    };
+    timer = setTimeout(tick, 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [working, applyJobs]);
 
   const submitFiles = useCallback(async (files) => {
     if (!setup?.ready) { setOpen(true); return; }
@@ -180,16 +229,10 @@ export function WardrobeImportFlow({ onGarmentApproved, onModeledApproved }) {
     setDragging(false); setError(""); setNotice(null);
     for (const file of images) {
       try {
-        const imageDataUrl = await fileToDataUrl(file);
-        const result = await api(API, { method: "POST", body: JSON.stringify({ imageDataUrl, metadata: { name: file.name.replace(/\.[^.]+$/, "") } }) });
-        const createdJobs = result.jobs || [result];
-        if (!createdJobs.length && result.noClothingDetected) {
-          setNotice({ tone: "complete", text: "No clothing detected", detail: `We couldn’t find a distinct wearable item in ${file.name}. Try a clearer or more tightly framed image.` });
-          setOpen(true);
-          continue;
-        }
-        setJobs((current) => [...current, ...createdJobs]);
-        setDrafts((current) => ({ ...current, ...Object.fromEntries(createdJobs.map((job) => [job.id, defaultDraft(job)])) }));
+        const imageDataUrl = await uploadDataUrl(file);
+        // Searched in the background like the phone's uploads, so a closed tab or a long search loses nothing.
+        const detection = await api(API, { method: "POST", body: JSON.stringify({ imageDataUrl, clientId: clientId(), background: true }) });
+        setSearching((current) => ({ ...current, [detection.id]: file.name }));
       } catch (requestError) { setError(requestError.message); }
     }
   }, [setup]);
@@ -261,13 +304,14 @@ export function WardrobeImportFlow({ onGarmentApproved, onModeledApproved }) {
 
   const active = jobs[jobs.length - 1];
   const setupRequired = setup?.ready === false;
-  const activeStatus = setupRequired ? { tone: "error", text: "Setup required" } : active ? deriveStatus(active) : notice;
+  const isSearching = Object.keys(searching).length > 0;
+  const activeStatus = setupRequired ? { tone: "error", text: "Setup required" } : active ? deriveStatus(active) : isSearching ? { tone: "processing", text: "Finding clothes in your photo" } : notice;
   const readyCount = jobs.filter((job) => deriveStatus(job).tone === "ready").length;
   const selectedReviewJob = jobs.find((job) => job.id === selectedReviewId && (reviewStageFor(job) || hasCleanupFailure(job)));
   const reviewJob = selectedReviewJob || jobs.find((job) => reviewStageFor(job)) || jobs.find((job) => hasCleanupFailure(job)) || active;
   const reviewStage = reviewJob ? reviewStageFor(reviewJob) : null;
   const progress = 0;
-  const hasImportActivity = Boolean(jobs.length || notice || setupRequired);
+  const hasImportActivity = Boolean(jobs.length || notice || setupRequired || isSearching);
 
   return (
     <>
@@ -280,7 +324,7 @@ export function WardrobeImportFlow({ onGarmentApproved, onModeledApproved }) {
       <div className="import-popover-backdrop" data-open={open} onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
         <section className="import-popover" role="dialog" aria-modal="true" aria-labelledby="import-title">
           <header className="import-popover__header"><div><p className="import-popover__eyebrow">Wardrobe import</p><h2 className="import-popover__title" id="import-title">{readyCount ? `${readyCount} ready for review` : activeStatus?.tone === "error" ? "Import needs attention" : jobs.length ? "Preparing new pieces" : notice?.text || "Add to your wardrobe"}</h2></div><button className="import-icon-button" type="button" onClick={() => setOpen(false)} aria-label="Close import progress"><X size={20} /></button></header>
-          {!jobs.length ? setupRequired ? <div className="import-drop-target import-setup-warning"><WarningCircle size={30} /><h2>Setup required</h2><p>Run <code>codex login</code> to use your ChatGPT plan, or add your OpenAI API key to <code>.env</code>, then restart the app.</p></div> : <div className="import-drop-target"><UploadSimple size={28} /><h2>{notice ? "Try another image" : "Choose or paste an image"}</h2><p>{notice?.detail || "We’ll isolate each clothing item, suggest its details, and hold everything for your approval."}</p><button className="import-button import-button--primary" disabled={!setup?.ready} onClick={() => { setNotice(null); inputRef.current?.click(); }}>Choose images</button></div> : (
+          {!jobs.length ? setupRequired ? <div className="import-drop-target import-setup-warning"><WarningCircle size={30} /><h2>Setup required</h2><p>Run <code>codex login</code> to use your ChatGPT plan, or add your OpenAI API key to <code>.env</code>, then restart the app.</p></div> : <div className="import-drop-target"><UploadSimple size={28} /><h2>{isSearching ? "Finding clothes…" : notice ? "Try another image" : "Choose or paste an image"}</h2><p>{notice?.detail || "We’ll isolate each clothing item, suggest its details, and hold everything for your approval."}</p><button className="import-button import-button--primary" disabled={!setup?.ready} onClick={() => { setNotice(null); inputRef.current?.click(); }}>Choose images</button></div> : (
             <>
               <div className={`import-progress${activeStatus?.tone !== "processing" ? " is-reviewing" : progress < 100 ? " is-indeterminate" : ""}`}><div className="import-progress__meta"><span>{activeStatus?.text}</span><span>{jobs.length} {jobs.length === 1 ? "item" : "items"}</span></div>{activeStatus?.tone === "processing" && <div className="import-progress__track"><div className="import-progress__bar" style={{ "--import-progress": `${progress}%` }} /></div>}</div>
               {reviewJob && reviewStage ? <ReviewEditor job={reviewJob} stage={reviewStage} draft={drafts[reviewJob.id] || defaultDraft(reviewJob)} setDraft={(draft) => setDrafts((current) => ({ ...current, [reviewJob.id]: draft }))} regenPrompt={regenerationPrompts[`${reviewJob.id}:${reviewStage}`] || ""} setRegenPrompt={(prompt) => setRegenerationPrompts((current) => ({ ...current, [`${reviewJob.id}:${reviewStage}`]: prompt }))} busy={busyId === reviewJob.id} onAction={(action, prompt) => perform(reviewJob, reviewStage, action, prompt)} /> : reviewJob && hasCleanupFailure(reviewJob) ? <CleanupEditor job={reviewJob} tolerance={cleanupTolerances[reviewJob.id] ?? reviewJob.stages.garment.cleanupTolerance ?? 46} setTolerance={(tolerance) => setCleanupTolerances((current) => ({ ...current, [reviewJob.id]: tolerance }))} busy={busyId === reviewJob.id} onPreview={(tolerance) => performCleanup(reviewJob, "preview", tolerance)} onAccept={() => performCleanup(reviewJob, "accept")} /> : null}
