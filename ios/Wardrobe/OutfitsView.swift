@@ -3,6 +3,8 @@ import SwiftUI
 struct OutfitsView: View {
     @Environment(Store.self) private var store
     @State private var selected: String?
+    /// Days showing the try-on; kept here because the pager can rebuild a day's page when its plan reloads.
+    @State private var onYou: Set<String> = []
 
     /// Planned days from today on, plus days still being styled.
     private var days: [String] {
@@ -18,7 +20,7 @@ struct OutfitsView: View {
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 0) {
                         ForEach(days, id: \.self) { date in
-                            DayPage(date: date)
+                            DayPage(date: date, showsTryOn: Binding(get: { onYou.contains(date) }, set: { if $0 { onYou.insert(date) } else { onYou.remove(date) } }))
                                 .containerRelativeFrame(.horizontal)
                                 .scrollTransition(axis: .horizontal) { content, phase in
                                     content
@@ -111,8 +113,7 @@ private struct DayStrip: View {
 private struct DayPage: View {
     @Environment(Store.self) private var store
     let date: String
-
-    @State private var showsTryOn = false
+    @Binding var showsTryOn: Bool
 
     private var plan: Plan? { store.plans.first { $0.date == date } }
     private var isStyling: Bool { store.planningDates.contains(date) }
@@ -201,7 +202,7 @@ private struct DayPage: View {
         .padding(.bottom, 16)
         .animation(Theme.spring, value: isStyling)
         // A restyle is a different outfit; show it first.
-        .onChange(of: plan?.garmentIds) { showsTryOn = false }
+        .onChange(of: plan?.garmentIds) { old, new in if old != nil, new != nil { showsTryOn = false } }
     }
 }
 
