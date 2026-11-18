@@ -6,7 +6,7 @@ import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback 
 import { createAIProvider } from "./openai-provider.mjs";
 import { parseChangelog } from "./changelog.mjs";
 import { createKeyedLock, createQueue } from "./queue.mjs";
-import { DATE, DEFAULT_WEARS, PALETTES, WEATHERS, buildPlanPrompt, historyFor, includeIssues, layerIssues, planIssues, planSchema, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { DATE, DEFAULT_WEARS, PALETTES, WEATHERS, buildPlanPrompt, historyFor, includeIssues, layerIssues, pairIssues, planIssues, planSchema, repeatedGarments, restyleIssues, rotationIssues, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const API_ROOT = "/api/import/jobs";
 const ASSET_ROOT = "/api/import/assets";
@@ -597,15 +597,24 @@ export function wardrobeImportApi(options = {}) {
       const part = library.find((item) => item.id === day.replace)?.part;
       if (!items.some((item) => item.part === part && item.id !== day.replace)) throw Object.assign(new Error(`No other ${PART_NAMES[part] || "piece"} to swap in`), { status: 409 });
     }
+    // A day that already has an outfit is a restyle: the current one comes first, then ones seen before it.
+    for (const day of days) {
+      const current = plans[day.date];
+      if (current && !day.replace) day.avoid = [current.garmentIds, ...(current.tried || []).toReversed()].slice(0, 5);
+    }
     const prompt = buildPlanPrompt({ items, days, history: historyFor(plans, days.map((day) => day.date)) });
     const report = (message) => days.forEach((day) => say(`plan:${day.date}`, message));
     let planned;
     try {
       ({ result: planned } = await untilApproved({
         attempts: PLAN_ATTEMPTS,
-        make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\nA previous attempt broke these rules; avoid them: ${feedback.join("; ")}.` : prompt, schema: planSchema })
+        make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\nA previous attempt broke these rules; avoid them: ${feedback.join("; ")}.` : prompt, schema: planSchema, effort: setting("PLANNER_REASONING_EFFORT", "medium") })
           .then((result) => validatePlan(result, { items, days })),
-        check: (planned) => [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items), ...includeIssues(days, planned)],
+        check: (planned) => {
+          const fresh = planned.filter((plan) => !days.find((day) => day.date === plan.date)?.replace);
+          return [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items), ...includeIssues(days, planned),
+            ...restyleIssues(days, planned, items), ...pairIssues(plans, fresh, items), ...rotationIssues(plans, fresh, items, days)];
+        },
         onRetry: (problems, attempt) => report(`Restyling to fix ${problems.length === 1 ? "a clash" : `${problems.length} clashes`} (${attempt}/${PLAN_ATTEMPTS})…`),
       }));
     } catch (error) {
@@ -628,7 +637,12 @@ export function wardrobeImportApi(options = {}) {
       }
       const createdAt = new Date().toISOString();
       const replacedTryOns = planned.map((plan) => fresh[plan.date]?.tryOn?.image);
-      for (const plan of planned) fresh[plan.date] = { ...plan, createdAt };
+      for (const plan of planned) {
+        // Earlier outfits for the day, so restyling again doesn't swing back to one of them.
+        const old = fresh[plan.date];
+        const tried = old ? [...(old.tried || []), old.garmentIds].slice(-5) : undefined;
+        fresh[plan.date] = { ...plan, createdAt, ...(tried && { tried }) };
+      }
       await atomicJson(plansFile, fresh);
       await Promise.all(replacedTryOns.map(removeOutfitImage));
       return await planList(fresh);

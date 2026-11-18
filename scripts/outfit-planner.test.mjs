@@ -3,7 +3,7 @@ import test from "node:test";
 import sharp from "sharp";
 import { buildTryOnPrompt, hasTransparentBackground, tryOnReferences } from "./import-job-api.mjs";
 import { pickModels } from "./openai-provider.mjs";
-import { duplicateCombos, historyFor, includeIssues, layerIssues, planIssues, repeatedGarments, swapIssues, validatePlan } from "./outfit-planner.mjs";
+import { duplicateCombos, historyFor, includeIssues, layerIssues, pairIssues, planIssues, repeatedGarments, restyleIssues, rotationIssues, swapIssues, validatePlan } from "./outfit-planner.mjs";
 
 const items = [
   { id: "tee", part: "upperbody" },
@@ -120,4 +120,36 @@ test("includeIssues flags a day that skipped the piece to build around", () => {
   const [day] = validatePlan({ outfits: [{ date: "2026-11-16", garmentIds: ["shirt", "jeans"] }] }, { items, days: [{ date: "2026-11-16", style: "x", palette: "bold", note: "dinner" }] });
   assert.equal(day.palette, "bold");
   assert.equal(day.note, "dinner");
+});
+
+test("the same jeans and hoodie together on close days is flagged, apart is fine", () => {
+  const closet = [...items, { id: "hoodie", part: "midlayer" }, { id: "sweater", part: "midlayer" }, { id: "sneakers", part: "shoes" }];
+  const plans = { "2026-11-18": plan("2026-11-18", ["tee", "hoodie", "jeans", "sneakers"]) };
+  assert.equal(pairIssues(plans, [plan("2026-11-19", ["shirt", "hoodie", "jeans", "sneakers"])], closet).length, 1);
+  // Shoes repeat freely, and the same jeans with another hoodie is a new look.
+  assert.deepEqual(pairIssues(plans, [plan("2026-11-19", ["shirt", "sweater", "jeans", "sneakers"])], closet), []);
+  assert.deepEqual(pairIssues(plans, [plan("2026-11-30", ["shirt", "hoodie", "jeans"])], closet), []);
+});
+
+test("rotation allows one extra wear but not leaning on a favorite", () => {
+  const closet = [...items, { id: "cords", part: "lowerbody" }];
+  const plans = { "2026-11-17": plan("2026-11-17", ["tee", "jeans"]) };
+  // Jeans two days running while chinos are unworn: fine.
+  assert.deepEqual(rotationIssues(plans, [plan("2026-11-18", ["shirt", "jeans"])], closet), []);
+  // A third day of jeans with chinos and cords still unworn: rotate.
+  const three = rotationIssues({ ...plans, "2026-11-18": plan("2026-11-18", ["shirt", "jeans"]) }, [plan("2026-11-19", ["tee", "jeans"])], closet);
+  assert.equal(three.length, 1);
+  assert.match(three[0], /rotate/);
+  // A piece the user asked to build around is exempt.
+  assert.deepEqual(rotationIssues({ ...plans, "2026-11-18": plan("2026-11-18", ["shirt", "jeans"]) }, [plan("2026-11-19", ["tee", "jeans"])], closet, [{ date: "2026-11-19", include: "jeans" }]), []);
+});
+
+test("a restyle must not return to a seen outfit or change just one piece", () => {
+  const closet = [...items, { id: "hoodie", part: "midlayer" }];
+  const days = [{ date: "2026-11-19", avoid: [["tee", "jeans", "hoodie"], ["shirt", "chinos"]] }];
+  assert.match(restyleIssues(days, [plan("2026-11-19", ["chinos", "shirt"])], closet)[0], /already rejected/);
+  assert.match(restyleIssues(days, [plan("2026-11-19", ["shirt", "jeans", "hoodie"])], closet)[0], /only 1 piece/);
+  // Close to the older outfit counts too, not only the current one.
+  assert.match(restyleIssues(days, [plan("2026-11-19", ["shirt", "chinos", "hoodie"])], closet)[0] ?? "", /only 1 piece/);
+  assert.deepEqual(restyleIssues([{ date: "2026-11-19", avoid: [["tee", "jeans", "hoodie"]] }], [plan("2026-11-19", ["shirt", "chinos", "hoodie"])], closet), []);
 });

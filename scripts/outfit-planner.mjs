@@ -46,32 +46,45 @@ export function historyFor(plans, dates) {
 }
 
 export function buildPlanPrompt({ items, days, history }) {
-  const wardrobe = items.map((item) => ({ ...pick(item), wears: wearsFor(item) }));
+  // Each piece carries the nearby dates it is already worn on, so rotation doesn't need cross-referencing ids.
+  const wardrobe = items.map((item) => ({ ...pick(item), wears: wearsFor(item), wornOn: history.filter((plan) => plan.garmentIds.includes(item.id)).map((plan) => plan.date) }));
   return `You are a personal stylist planning outfits from a real wardrobe.
 
 Plan exactly one outfit for each requested day:
 ${JSON.stringify(days)}
 
-Available wardrobe (only these garments may be used; anything else is in the laundry or unavailable):
+Available wardrobe (only these garments may be used; anything else is in the laundry or unavailable). wornOn lists nearby dates each piece is already worn:
 ${JSON.stringify(wardrobe)}
 
 Outfits already worn or planned on nearby dates:
 ${JSON.stringify(history)}
 
-Rules:
+How to style each day:
+- Picture three genuinely different outfits first, each with its own color story (for example tonal neutrals, light top over a dark bottom, one warm accent color), then keep the strongest. Neighbouring days should not all share one color story.
+- Build from the bottom and the layers outward: the bottom and any midlayer or outer layer set the outfit's shape and colors; then pick a base top that works under them, and shoes last.
+- Use the pieces' hex colors: aim for a clear light-dark contrast between pieces or a deliberate tonal look, keep to one statement color or graphic, and avoid colors that almost but don't quite match (two different browns, two slightly different greys).
+- Read each garment's description and text: pair pieces whose fabric, warmth and formality suit each other, and never combine two loud graphics or slogans in one outfit. Under a hoodie or sweater, prefer a plain or small-logo base top.
+- Match each day's requested style.
+
+Structure:
 - Each outfit has exactly one upperbody base top (t-shirt, shirt) and one lowerbody bottom, plus optional midlayer (hoodie, sweater), wholebody_up outer layer (jacket, coat, rain jacket), shoes, and at most one accessories_up item. A midlayer or outer layer never replaces the base top; it goes over it, so a cold day can stack base top + midlayer + outer layer.
 - Dress for each day's weather: warm means base top only, no midlayer or outer layer; mild allows one light layer when the style suits it; cold needs a midlayer, plus an outer layer when one is available; rain needs an outer layer when one is available, plus a midlayer if it is also chilly; auto means judge from the date's usual season.
 - palette is the day's color preference: any means no preference; neutral means black, white, grey, beige, navy and denim; muted means soft, desaturated colors; bold means one or two saturated statement colors; monochrome means one color family head to toe.
 - A day with include must contain that garment id; build the rest of the outfit around it.
 - note is the user's own words about the day (plans, dress code, activities, how they feel). Follow it where the wardrobe allows and mention it in the reason.
-- Read each garment's description and text: pair pieces whose fabric, warmth and formality suit each other, and never combine two loud graphics or slogans in one outfit.
-- Match each day's requested style. Use color harmony: tonal or analogous palettes, one statement piece at most.
-- wears is how many times a garment can be worn before it needs washing. Within ${SPACING_DAYS} days either side of any date, a garment may be worn on at most wears dates in total, counting the history and the other days in this plan. So a wears-1 tee should not repeat within ${SPACING_DAYS} days, while wears-3 jeans can be worn on up to three close or consecutive days. Only go past a limit when the wardrobe has no alternative for that part; then reuse the one worn longest ago, preferring neutral basics.
+
+Rotation:
+- wears is how many times a garment can be worn before it needs washing; it is a limit, not a target. Within ${SPACING_DAYS} days either side of any date, a garment may be worn on at most wears dates in total, counting the history and the other days in this plan. Only go past a limit when the wardrobe has no alternative for that part; then reuse the one worn longest ago.
+- Rotate within each part: prefer the piece with the fewest wornOn dates and the fewest uses in this plan. Wearing the same bottom two days in a row is fine, but spread all the bottoms and all the midlayers across the days instead of building most outfits on one favorite.
+- Never put the same two pieces together again within ${SPACING_DAYS} days: not the same bottom with the same midlayer or outer layer, and not the same base top with the same bottom.
 - Never repeat an exact garment combination from the history or within this plan.
-- Spread usage across the whole wardrobe instead of leaning on the same favorites.
-- Every requested date must get a complete outfit. The repetition rules are preferences: when the wardrobe is too small to satisfy them, repeat the least recently worn pieces rather than leaving a day empty.
+- Every requested date must get a complete outfit. When the wardrobe is too small for these preferences, repeat the least recently worn pieces rather than leaving a day empty.
+
+Restyles and swaps:
+- A day with avoid is being restyled: the user has already seen those outfits and wants something else. Give it a clearly different outfit from every one in avoid: change the bottom or the layer, change the base top, and use a different color story. Swapping a single piece is not enough.
 - A day with replace is a swap: keep that day's keep garments and replace only the replace garment with a different garment of the same part.
-- Use exact ids from the wardrobe list. name is a short evocative outfit title; reason is one sentence on why it works for the style.
+
+Use exact ids from the wardrobe list. name is a short evocative outfit title; reason is one sentence on why it works for the style and colors.
 
 Return JSON with an outfits array containing one entry per requested date.`;
 }
@@ -171,4 +184,57 @@ export function duplicateCombos(plans) {
   const groups = new Map();
   for (const plan of Object.values(plans)) groups.set(comboKey(plan.garmentIds), [...(groups.get(comboKey(plan.garmentIds)) || []), plan.date]);
   return [...groups.values()].filter((dates) => dates.length > 1).flat();
+}
+
+// Parts that make an outfit's look; shoes and accessories repeat too often to count.
+const LOOK = new Set(["upperbody", "midlayer", "wholebody_up", "lowerbody"]);
+// Parts a closet usually has a few of, which should take turns.
+const ROTATING = ["lowerbody", "midlayer", "wholebody_up"];
+const near = (a, b) => a !== b && Math.abs(dayNumber(a) - dayNumber(b)) <= SPACING_DAYS;
+
+// Fresh days that put the same two look pieces together as another day close by, e.g. the same jeans and hoodie.
+export function pairIssues(plans, planned, items) {
+  const merged = { ...plans, ...Object.fromEntries(planned.map((plan) => [plan.date, plan])) };
+  const partOf = new Map(items.map((item) => [item.id, item.part]));
+  const look = (ids) => ids.filter((id) => LOOK.has(partOf.get(id)));
+  return planned.flatMap(({ date, garmentIds }) => {
+    const mine = look(garmentIds);
+    for (const other of Object.values(merged)) {
+      if (!near(date, other.date)) continue;
+      const shared = mine.filter((id) => other.garmentIds.includes(id));
+      if (shared.length >= 2) return [`${date} pairs ${shared.join(" with ")} again, as on ${other.date}: change one of them`];
+    }
+    return [];
+  });
+}
+
+// Fresh days that lean on one piece while another of the same part sits unworn nearby.
+export function rotationIssues(plans, planned, items, days = []) {
+  const merged = { ...plans, ...Object.fromEntries(planned.map((plan) => [plan.date, plan])) };
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const uses = (id, date) => Object.values(merged).filter((plan) => near(date, plan.date) && plan.garmentIds.includes(id)).length;
+  return planned.flatMap(({ date, garmentIds }) => {
+    const day = days.find((entry) => entry.date === date);
+    return garmentIds.flatMap((id) => {
+      const part = byId.get(id)?.part;
+      if (!ROTATING.includes(part) || id === day?.include) return [];
+      const others = items.filter((item) => item.part === part && item.id !== id).map((item) => ({ id: item.id, count: uses(item.id, date) }));
+      const least = others.sort((a, b) => a.count - b.count)[0];
+      const count = uses(id, date);
+      // One extra wear is fine (the same jeans two days running); two more than a sibling is leaning on a favorite.
+      return least && count - least.count >= 2 ? [`${date} wears ${id} on ${count + 1} nearby days while ${least.id} is worn on ${least.count}: rotate to a less worn ${part}`] : [];
+    });
+  });
+}
+
+// Restyles that came back to an outfit the user already saw, or changed too little of the current one.
+export function restyleIssues(days, planned, items) {
+  const partOf = new Map(items.map((item) => [item.id, item.part]));
+  return days.filter((day) => day.avoid?.length && !day.replace).flatMap(({ date, avoid }) => {
+    const ids = planned.find((plan) => plan.date === date)?.garmentIds || [];
+    if (avoid.some((seen) => comboKey(seen) === comboKey(ids))) return [`${date} repeats an outfit the user already rejected`];
+    // Measured against every outfit seen, so a restyle can't drift back to an earlier one with one piece changed.
+    const changed = Math.min(...avoid.map((seen) => ids.filter((id) => LOOK.has(partOf.get(id)) && !seen.includes(id)).length));
+    return changed >= 2 ? [] : [`${date} is a restyle but differs by only ${changed} piece${changed === 1 ? "" : "s"} from an outfit the user already saw: change at least the base top and the bottom or layer`];
+  });
 }

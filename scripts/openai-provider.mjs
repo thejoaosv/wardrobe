@@ -87,7 +87,7 @@ export function createAIProvider(setting) {
   }
 
   // Runs one non-interactive Codex turn on the user's ChatGPT plan inside a throwaway directory.
-  async function codex({ prompt, images = [], schema, model, sandbox = "read-only", timeout = 5 * 60 * 1000 }) {
+  async function codex({ prompt, images = [], schema, model, effort, sandbox = "read-only", timeout = 5 * 60 * 1000 }) {
     const dir = await mkdtemp(path.join(tmpdir(), "wardrobe-codex-"));
     try {
       const imageArgs = [];
@@ -97,7 +97,7 @@ export function createAIProvider(setting) {
         imageArgs.push(`--image=${file}`);
       }
       const args = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "-s", sandbox, "-C", dir,
-        "-c", `model_reasoning_effort="${setting("CODEX_REASONING_EFFORT", "low")}"`, "-o", path.join(dir, "last.txt"), ...imageArgs];
+        "-c", `model_reasoning_effort="${effort || setting("CODEX_REASONING_EFFORT", "low")}"`, "-o", path.join(dir, "last.txt"), ...imageArgs];
       if (model) args.push("-m", model);
       if (schema) {
         await writeFile(path.join(dir, "schema.json"), JSON.stringify(schema));
@@ -177,10 +177,11 @@ export function createAIProvider(setting) {
     },
 
     // Structured JSON from text plus optional PNG images. kind picks the API model ("vision" or "planner").
-    async json({ prompt, images, schema, kind = "planner" }) {
+    // effort overrides Codex's reasoning effort for work worth more thought, like styling.
+    async json({ prompt, images, schema, kind = "planner", effort }) {
       const active = await provider();
       if (!active) throw new Error("No AI provider: sign in with `codex login` or set OPENAI_API_KEY");
-      return active === "codex" ? codexJSON({ prompt, images, schema, model: await codexModel(kind) }) : apiJSON({ prompt, images, schema, kind });
+      return active === "codex" ? codexJSON({ prompt, images, schema, effort, model: await codexModel(kind) }) : apiJSON({ prompt, images, schema, kind });
     },
 
     // Image edit from labelled PNG inputs: images is [{ data, role }], in the order the prompt calls Image 1, Image 2, ...
