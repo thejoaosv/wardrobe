@@ -2,6 +2,11 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.6.0 — 2026-11-18
+- Restyling a day gives a clearly different outfit and never swings back to one you already saw
+- Outfits rotate your bottoms and hoodies instead of leaning on one favorite, and don't pair the same two pieces again within a few days
+- The stylist weighs a few color stories per day and thinks longer before choosing
+
 ## 1.5.1 — 2026-11-18
 - Text that appears on both the front and the back stays listed on both sides when a back photo updates a piece
 
