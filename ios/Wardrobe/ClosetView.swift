@@ -116,8 +116,11 @@ private struct ClosetCell: View {
     var body: some View {
         Button(action: open) {
             GarmentImage(item: item)
-                .padding(8)
+                .padding(12)
                 .aspectRatio(1, contentMode: .fit)
+                // A soft pool of light behind each piece with no edge: black clothes stand out on the dark canvas,
+                // white ones on the light canvas, and the grid still reads as clothes, not cards.
+                .background(EllipticalGradient(colors: [Theme.ink.opacity(0.1), Theme.ink.opacity(0)], center: .center, startRadiusFraction: 0, endRadiusFraction: 0.56))
                 .saturation(item.isAvailable ? 1 : 0)
                 .opacity(item.isAvailable ? 1 : 0.35)
                 .overlay(alignment: .bottomTrailing) {
@@ -145,8 +148,6 @@ private struct ClosetCell: View {
             }
             Button("Remove piece", systemImage: "trash", role: .destructive) { Task { await store.delete(item) } }
         }
-        // After the menu, so the long-press preview isn't a clipped glow.
-        .garmentLift()
     }
 }
 
