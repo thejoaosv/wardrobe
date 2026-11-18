@@ -130,7 +130,7 @@ struct ItemSheet: View {
                                 }
                             } label: {
                                 photoRow(.back, title: live.backImage == nil ? "Add the back" : "Back", symbol: "arrow.uturn.backward.square",
-                                         detail: live.backImage == nil ? "Try-ons can then show it" : "Redo, replace or remove")
+                                         detail: live.backImage == nil ? "Truer details for outfits" : "Redo, replace or remove")
                             }
                             .disabled(isBusy(.back))
                         }
