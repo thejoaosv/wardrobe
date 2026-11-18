@@ -134,11 +134,21 @@ private struct DayPage: View {
         return (parts.intersection(owned).union(["upperbody", "lowerbody"]), maybe.intersection(owned))
     }
 
+    /// "Casual · Rain", leaving out what wasn't chosen.
+    private var subtitle: String {
+        let weather = ["warm": "Warm", "mild": "Mild", "cold": "Cold", "rain": "Rain"][plan?.weather ?? store.planning[date]?.weather ?? ""]
+        return [plan?.style ?? store.planning[date]?.style, weather].compactMap(\.self).joined(separator: " · ")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(plan?.style ?? " ").eyebrow()
-                Text(Day.date(date), format: .dateTime.weekday(.wide)).font(.display(38))
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(subtitle.isEmpty ? " " : subtitle).eyebrow()
+                    Text(Day.date(date), format: .dateTime.weekday(.wide)).font(.display(38))
+                }
+                Spacer(minLength: 0)
+                if let plan, !isStyling { DayMenu(plan: plan).transition(.opacity) }
             }
             .padding(.horizontal, 24)
 
@@ -153,78 +163,75 @@ private struct DayPage: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.vertical, 12)
             .padding(.horizontal, 32)
-            .overlay(alignment: .topTrailing) {
-                if let plan, !isStyling, store.config?.hasModelReference == true {
-                    TryOnBadge(plan: plan).padding(.trailing, 20).transition(.opacity)
-                }
-            }
 
-            if let plan, !isStyling {
-                PlanFooter(plan: plan).padding(.horizontal, 24).transition(.opacity)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Styling…").eyebrow()
-                    if let status = store.progress["plan:\(date)"] {
-                        Text(status).font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2).transition(.opacity)
+            Group {
+                if let plan, !isStyling {
+                    DayDetails(plan: plan).transition(.opacity)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Styling…").font(.display(24))
+                        Text(store.progress["plan:\(date)"] ?? "Picking pieces that go together.")
+                            .font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2)
+                            .contentTransition(.opacity)
                     }
+                    .animation(.easeInOut(duration: 0.25), value: store.progress["plan:\(date)"])
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .animation(.easeInOut(duration: 0.25), value: store.progress["plan:\(date)"])
-                .padding(.horizontal, 24)
-                .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
             }
+            .padding(.horizontal, 24)
         }
-        .padding(.bottom, 12)
+        .padding(.bottom, 16)
         .animation(Theme.spring, value: isStyling)
     }
 }
 
-private struct PlanFooter: View {
+/// Restyle and remove, tucked into one round button by the day's title.
+private struct DayMenu: View {
+    @Environment(Store.self) private var store
+    let plan: Plan
+
+    var body: some View {
+        Menu {
+            Button("Restyle", systemImage: "sparkles") { Task { await store.generate([PlanDay(plan)]) } }
+            Button("Remove", systemImage: "trash", role: .destructive) { Task { await store.deletePlan(plan) } }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .foregroundStyle(Theme.ink)
+                .background(Theme.ink.opacity(0.06), in: Circle())
+        }
+        .accessibilityLabel("Outfit options")
+    }
+}
+
+/// The outfit's name, why it works (in full), what's in the wash, and the try-on.
+private struct DayDetails: View {
     @Environment(Store.self) private var store
     let plan: Plan
 
     private var inLaundry: [Item] { plan.garmentIds.compactMap(store.item).filter { !$0.isAvailable } }
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(plan.name).font(.display(24)).lineLimit(1).minimumScaleFactor(0.8)
-                if inLaundry.isEmpty {
-                    Text(plan.reason).font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2)
-                } else {
-                    Label("\(inLaundry.map(\.name).formatted()) in the wash", systemImage: "washer")
-                        .font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2)
-                }
+                Text(plan.name).font(.display(26)).lineLimit(2).minimumScaleFactor(0.85)
+                Text(plan.reason).font(.subheadline).foregroundStyle(Theme.muted)
+                    .lineLimit(5).fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
-            if inLaundry.isEmpty {
-                Menu {
-                    Button("Restyle", systemImage: "sparkles") { restyle() }
-                    Button("Remove", systemImage: "trash", role: .destructive) { Task { await store.deletePlan(plan) } }
-                } label: {
-                    circle("ellipsis", filled: false)
+            if !inLaundry.isEmpty {
+                Label("\(inLaundry.map(\.name).formatted()) in the wash", systemImage: "washer")
+                    .font(.footnote.weight(.medium)).foregroundStyle(Theme.ink)
+            }
+            HStack(spacing: 10) {
+                if !inLaundry.isEmpty {
+                    // Something is in the wash, so restyling becomes the obvious next step.
+                    Button("Restyle", systemImage: "sparkles") { Task { await store.generate([PlanDay(plan)]) } }
+                        .buttonStyle(QuietButtonStyle())
                 }
-                .accessibilityLabel("Outfit options")
-            } else {
-                // Something is in the wash, so restyling becomes the one obvious action.
-                Button(action: restyle) { circle("sparkles", filled: true) }
-                    .buttonStyle(PressableStyle())
-                    .accessibilityLabel("Restyle")
-                    .transition(.scale.combined(with: .opacity))
+                if store.config?.hasModelReference == true { TryOnControl(plan: plan) }
             }
         }
-        .frame(minHeight: 96, alignment: .top)
-    }
-
-    private func circle(_ symbol: String, filled: Bool) -> some View {
-        Image(systemName: symbol)
-            .font(.body.weight(.semibold))
-            .frame(width: 44, height: 44)
-            .foregroundStyle(filled ? Theme.canvas : Theme.ink)
-            .background(filled ? Theme.ink : Theme.ink.opacity(0.06), in: Circle())
-    }
-
-    private func restyle() {
-        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, weather: plan.weather ?? "auto")]) }
     }
 }
 
@@ -289,15 +296,11 @@ private struct GarmentPiece: View {
 
     var body: some View {
         GarmentImage(item: item)
-            .garmentLift()
-            .saturation(item.isAvailable ? 1 : 0)
-            .opacity(shown ? (item.isAvailable ? 1 : 0.45) : 0)
-            .offset(y: shown || reduceMotion ? 0 : 28)
-            .scaleEffect(shown || reduceMotion ? 1 : 0.94)
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24, style: .continuous))
             .contextMenu {
                 if let plan {
                     Button("Swap this piece", systemImage: "arrow.triangle.2.circlepath") {
-                        Task { await store.generate([PlanDay(date: Day.date(plan.date), style: plan.style, weather: plan.weather ?? "auto", replace: item.id)]) }
+                        Task { await store.generate([PlanDay(plan, replace: item.id)]) }
                     }
                 }
                 Button(item.isAvailable ? "In the wash" : "Back from the wash", systemImage: "washer") {
@@ -305,6 +308,12 @@ private struct GarmentPiece: View {
                 }
                 Button("Remove piece", systemImage: "trash", role: .destructive) { Task { await store.delete(item) } }
             }
+            // After the menu, so the long-press preview shows the piece without its glow cut off at the edges.
+            .garmentLift()
+            .saturation(item.isAvailable ? 1 : 0)
+            .opacity(shown ? (item.isAvailable ? 1 : 0.45) : 0)
+            .offset(y: shown || reduceMotion ? 0 : 28)
+            .scaleEffect(shown || reduceMotion ? 1 : 0.94)
             .onTapGesture { editing = true }
             .sheet(isPresented: $editing) { ItemSheet(item: item) }
             .onAppear {
@@ -356,8 +365,8 @@ private struct StylingPlaceholder: View {
     }
 }
 
-/// Small corner control: ask for a try-on, watch it work, then open the result.
-private struct TryOnBadge: View {
+/// Try-on in the details row: ask for one, watch it work with the AI's status, then open the result.
+private struct TryOnControl: View {
     @Environment(Store.self) private var store
     @Namespace private var zoom
     @State private var showing = false
@@ -368,39 +377,48 @@ private struct TryOnBadge: View {
             switch plan.tryOn?.status {
             case "ready":
                 Button { showing = true } label: {
-                    AsyncImage(url: store.url(plan.tryOn?.image, width: 300), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
-                        if case .success(let image) = phase { image.resizable().scaledToFill().transition(.opacity) } else { Theme.ink.opacity(0.06) }
+                    HStack(spacing: 10) {
+                        AsyncImage(url: store.url(plan.tryOn?.image, width: 300), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                            if case .success(let image) = phase { image.resizable().scaledToFill().transition(.opacity) } else { Theme.ink.opacity(0.06) }
+                        }
+                        .frame(width: 30, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        Text("See it on you").font(.subheadline.weight(.medium))
                     }
-                    .frame(width: 64, height: 96)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
+                    .foregroundStyle(Theme.ink)
+                    .padding(.leading, 7).padding(.trailing, 16)
+                    .frame(minHeight: 52)
+                    .background(Theme.ink.opacity(0.06), in: Capsule())
                 }
                 .buttonStyle(PressableStyle())
                 .matchedTransitionSource(id: plan.date, in: zoom)
                 .accessibilityLabel("See \(plan.name) on you")
-                .transition(.scale(scale: 0.6).combined(with: .opacity))
             case "processing":
-                VStack(alignment: .trailing, spacing: 6) {
-                    Label("Dressing you…", systemImage: "sparkles")
-                        .font(.footnote.weight(.medium))
-                        .symbolEffect(.pulse)
-                        .foregroundStyle(Theme.muted)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 36)
-                        .background(Theme.ink.opacity(0.06), in: Capsule())
-                    if let status = store.progress["tryon:\(plan.date)"] {
-                        Text(status).font(.caption).foregroundStyle(Theme.muted).multilineTextAlignment(.trailing).lineLimit(3)
-                            .frame(maxWidth: 180, alignment: .trailing)
-                            .transition(.opacity)
+                HStack(spacing: 10) {
+                    Image(systemName: "sparkles").symbolEffect(.pulse)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Dressing you…").font(.subheadline.weight(.medium))
+                        if let status = store.progress["tryon:\(plan.date)"] {
+                            Text(status).font(.caption).foregroundStyle(Theme.muted).lineLimit(1).contentTransition(.opacity)
+                        }
                     }
                 }
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 52)
+                .background(Theme.ink.opacity(0.06), in: Capsule())
+                .animation(.easeInOut(duration: 0.25), value: store.progress["tryon:\(plan.date)"])
             default:
-                Button(plan.tryOn?.status == "failed" ? "Try again" : "Try on", systemImage: "person.crop.rectangle") {
-                    Task { await store.tryOn(plan) }
+                VStack(alignment: .leading, spacing: 6) {
+                    Button(plan.tryOn?.status == "failed" ? "Try on again" : "Try it on", systemImage: "person.crop.rectangle") {
+                        Task { await store.tryOn(plan) }
+                    }
+                    .buttonStyle(QuietButtonStyle())
+                    .accessibilityHint("Makes a photo of you wearing this outfit")
+                    if plan.tryOn?.status == "failed", let error = plan.tryOn?.error {
+                        Text(error).font(.caption).foregroundStyle(Theme.muted).lineLimit(2)
+                    }
                 }
-                .labelStyle(.titleAndIcon)
-                .buttonStyle(QuietButtonStyle())
-                .accessibilityHint("Makes a photo of you wearing this outfit")
             }
         }
         .animation(Theme.spring, value: plan.tryOn?.status)
