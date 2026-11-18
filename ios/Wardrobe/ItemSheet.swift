@@ -12,9 +12,16 @@ struct ItemSheet: View {
     @State private var picking: Side?
     @State private var shooting: Side?
     @State private var confirmingRemove = false
+    /// The side shown in the pager; held here so it stays put when a cutout finishes.
+    @State private var page = Side.front
+    /// The side whose photo is on its way to the Mac, before the server reports it as processing.
+    @State private var sending: Side?
+    @State private var scroll = ScrollPosition(edge: .top)
     private let original: Item
 
     enum Side: String, Identifiable { case front, back; var id: String { rawValue } }
+
+    private func isBusy(_ side: Side) -> Bool { sending == side || (side == .front ? frontStatus : backStatus) == "processing" }
 
     init(item: Item) {
         original = item
@@ -110,9 +117,9 @@ struct ItemSheet: View {
                                 Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .front) } }
                                 photoSources(.front)
                             } label: {
-                                PanelRow(title: "Redo cutout", symbol: "wand.and.sparkles", detail: "Pressed and checked again") { RowValue() }
+                                photoRow(.front, title: "Redo cutout", symbol: "wand.and.sparkles", detail: "Pressed and checked again")
                             }
-                            .disabled(frontStatus == "processing")
+                            .disabled(isBusy(.front))
                             Menu {
                                 if live.backImage != nil {
                                     Button("From its photo", systemImage: "arrow.clockwise") { Task { await use(nil, for: .back) } }
@@ -122,10 +129,10 @@ struct ItemSheet: View {
                                     Button("Remove back", systemImage: "trash", role: .destructive) { Task { await store.removeBack(live) } }
                                 }
                             } label: {
-                                PanelRow(title: live.backImage == nil ? "Add the back" : "Back", symbol: "arrow.uturn.backward.square",
-                                         detail: live.backImage == nil ? "Try-ons can then show it" : "Redo, replace or remove") { RowValue() }
+                                photoRow(.back, title: live.backImage == nil ? "Add the back" : "Back", symbol: "arrow.uturn.backward.square",
+                                         detail: live.backImage == nil ? "Try-ons can then show it" : "Redo, replace or remove")
                             }
-                            .disabled(backStatus == "processing")
+                            .disabled(isBusy(.back))
                         }
                         photoNote.font(.footnote).padding(.horizontal, 4)
                     }
@@ -137,6 +144,7 @@ struct ItemSheet: View {
                 }
                 .padding(24)
             }
+            .scrollPosition($scroll)
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.canvas.ignoresSafeArea())
             .toolbar {
@@ -210,9 +218,9 @@ struct ItemSheet: View {
 
     /// Front and back in a pager, straight on the canvas; a side being made shows its skeleton and the AI's status.
     private var photos: some View {
-        TabView {
+        TabView(selection: $page) {
             Group {
-                if frontStatus == "processing" {
+                if isBusy(.front) {
                     working("Redoing the cutout…")
                 } else {
                     GarmentImage(item: live).garmentLift()
@@ -220,9 +228,10 @@ struct ItemSheet: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 36)
-            if backStatus == "processing" || live.backImage != nil {
+            .tag(Side.front)
+            if isBusy(.back) || live.backImage != nil {
                 Group {
-                    if backStatus == "processing" {
+                    if isBusy(.back) {
                         working(live.backImage == nil ? "Cutting out the back…" : "Redoing the back…")
                     } else {
                         AsyncImage(url: store.url(live.backImage, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
@@ -234,9 +243,10 @@ struct ItemSheet: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 36)
+                .tag(Side.back)
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: live.backImage != nil || backStatus == "processing" ? .automatic : .never))
+        .tabViewStyle(.page(indexDisplayMode: live.backImage != nil || isBusy(.back) ? .automatic : .never))
         .indexViewStyle(.page(backgroundDisplayMode: .never))
         .frame(height: 340)
         .padding(.horizontal, -24)
@@ -290,6 +300,13 @@ struct ItemSheet: View {
 
     /// nil redoes that side from the photo it already has.
     private func use(_ jpeg: Data?, for side: Side) async {
+        // Show that side being made, at the top where its skeleton and status are.
+        sending = side
+        defer { sending = nil }
+        withAnimation(Theme.spring) {
+            page = side
+            scroll.scrollTo(edge: .top)
+        }
         switch side {
         case .front:
             await save()
@@ -297,6 +314,16 @@ struct ItemSheet: View {
         case .back:
             await store.addBack(live, jpeg: jpeg)
         }
+    }
+
+    /// A photo action's row; while that side is being made it says so, with a spinner instead of the chevron.
+    private func photoRow(_ side: Side, title: String, symbol: String, detail: String) -> some View {
+        let busy = isBusy(side)
+        let doing = side == .front ? "Redoing the cutout" : live.backImage == nil ? "Cutting out the back" : "Redoing the back"
+        return PanelRow(title: busy ? doing : title, symbol: symbol, detail: busy ? (sending == side ? "Sending the photo…" : status ?? "About a minute") : detail) {
+            if busy { ProgressView() } else { RowValue() }
+        }
+        .animation(.easeInOut(duration: 0.2), value: busy)
     }
 
     private func working(_ title: String) -> some View {
