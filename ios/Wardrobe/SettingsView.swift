@@ -1,19 +1,13 @@
 import PhotosUI
 import SwiftUI
 
-enum SettingsPage: Hashable { case connection, quality, photo, laundry, changelog }
+enum SettingsPage: Hashable { case connection, quality, photo, laundry, about, changelog }
 
 /// A short overview of every setting; each opens its own page, so nothing is piled on top of anything else.
 struct SettingsView: View {
     @Environment(Store.self) private var store
     @Environment(\.openURL) private var openURL
     @State private var path: [SettingsPage] = []
-    @State private var versionTaps = 0
-
-    private var appVersion: String {
-        let info = Bundle.main.infoDictionary
-        return "\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
-    }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -21,56 +15,33 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 30) {
                     Text("Settings").font(.display(34))
 
-                    Panel {
-                        link(.connection) {
-                            PanelRow(title: store.config == nil ? "Not connected" : "Connected", symbol: store.config == nil ? "wifi.slash" : "desktopcomputer",
-                                     detail: store.serverIsOutdated ? "The server on your Mac needs an update" : store.serverURL) {
-                                RowValue()
-                            }
+                    link(.connection) {
+                        HStack(spacing: 10) {
+                            Circle().fill(store.config == nil ? Color.red : store.serverIsOutdated ? Color.orange : Color.green).frame(width: 8, height: 8)
+                            Text(store.config == nil ? "Not connected to your Mac" : store.serverIsOutdated ? "Your Mac needs an update" : "Connected to your Mac")
+                                .font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
+                            Spacer()
+                            RowValue()
                         }
+                        .padding(.horizontal, 18)
+                        .frame(minHeight: 52)
+                        .background(Theme.card, in: Capsule())
                     }
 
                     Panel(title: "Outfits") {
-                        link(.laundry) { PanelRow(title: "Wears before washing", symbol: "washer", detail: "Defaults by type of clothing") { RowValue() } }
-                        link(.photo) {
-                            PanelRow(title: "Photo of you", symbol: "person.crop.rectangle", detail: "For try-ons") {
-                                RowValue(text: store.config?.hasModelReference == true ? "Added" : "Not added")
-                            }
-                        }
-                    }
-
-                    Panel(title: "AI") {
-                        link(.quality) {
-                            PanelRow(title: "Quality checks", symbol: "checkmark.seal", detail: "Checks every result") {
-                                RowValue(text: store.settings?.checks == "fast" ? "Fast" : "Thorough")
-                            }
-                        }
-                        PanelRow(title: "Runs on", symbol: "sparkles") {
-                            Text(["codex": "ChatGPT plan", "api": "API key"][store.config?.provider ?? ""] ?? "Not set up").foregroundStyle(Theme.muted)
-                        }
+                        link(.laundry) { PanelRow(title: "Washing", symbol: "washer") { RowValue() } }
+                        link(.photo) { PanelRow(title: "Photo of you", symbol: "person.crop.rectangle") { RowValue() } }
                     }
 
                     Panel(title: "App") {
+                        link(.quality) { PanelRow(title: "AI quality", symbol: "checkmark.seal") { RowValue() } }
                         Button {
                             if let url = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(url) }
                         } label: {
-                            PanelRow(title: "Notifications", symbol: "bell", detail: "When cutouts and try-ons are ready") { RowValue(symbol: "arrow.up.right") }
+                            PanelRow(title: "Notifications", symbol: "bell") { RowValue(symbol: "arrow.up.right") }
                         }
                         .buttonStyle(.plain)
-                    }
-
-                    Panel(title: "About") {
-                        PanelRow(title: "Valet") { Text(appVersion).foregroundStyle(Theme.muted) }
-                        // Looks like a plain row; five quick taps open the changelog.
-                        Button {
-                            versionTaps += 1
-                            if versionTaps >= 5, store.version != nil { path.append(.changelog); versionTaps = 0 }
-                        } label: {
-                            PanelRow(title: "Server") {
-                                Text(store.version?.version ?? (store.config == nil ? "Not connected" : "Before 1.2")).foregroundStyle(Theme.muted)
-                            }
-                        }
-                        .buttonStyle(.plain)
+                        link(.about) { PanelRow(title: "About", symbol: "info.circle") { RowValue() } }
                     }
                 }
                 .padding(24)
@@ -85,6 +56,7 @@ struct SettingsView: View {
                     case .quality: QualityPage()
                     case .photo: PhotoPage()
                     case .laundry: LaundryPage()
+                    case .about: AboutPage(path: $path)
                     case .changelog: ChangelogPage(releases: store.version?.changelog ?? [])
                     }
                 }
@@ -157,7 +129,7 @@ private struct QualityPage: View {
     @Environment(Store.self) private var store
 
     var body: some View {
-        Page(title: "Quality checks") {
+        Page(title: "AI quality") {
             Text("After the AI finds clothes, cuts them out or dresses you, a second look can check its work against your photo.")
                 .font(.subheadline).foregroundStyle(Theme.muted)
             VStack(spacing: 12) {
@@ -241,7 +213,7 @@ private struct LaundryPage: View {
     @Environment(Store.self) private var store
 
     var body: some View {
-        Page(title: "Wears before washing") {
+        Page(title: "Washing") {
             Text("How many times each type is worn before it goes in the wash. Outfits can repeat a piece on nearby days up to this many times. A piece can still set its own.")
                 .font(.subheadline).foregroundStyle(Theme.muted)
             Panel {
@@ -254,6 +226,38 @@ private struct LaundryPage: View {
             .disabled(store.settings?.wears == nil)
             if store.settings?.wears == nil {
                 Text("Update the server on your Mac to change these.").font(.footnote).foregroundStyle(Theme.muted)
+            }
+        }
+    }
+}
+
+private struct AboutPage: View {
+    @Environment(Store.self) private var store
+    @Binding var path: [SettingsPage]
+    @State private var versionTaps = 0
+
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        return "\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
+    }
+
+    var body: some View {
+        Page(title: "About") {
+            Panel {
+                PanelRow(title: "Valet") { Text(appVersion).foregroundStyle(Theme.muted) }
+                // Looks like a plain row; five quick taps open the changelog.
+                Button {
+                    versionTaps += 1
+                    if versionTaps >= 5, store.version != nil { path.append(.changelog); versionTaps = 0 }
+                } label: {
+                    PanelRow(title: "Server") {
+                        Text(store.version?.version ?? (store.config == nil ? "Not connected" : "Before 1.2")).foregroundStyle(Theme.muted)
+                    }
+                }
+                .buttonStyle(.plain)
+                PanelRow(title: "AI runs on") {
+                    Text(["codex": "ChatGPT plan", "api": "API key"][store.config?.provider ?? ""] ?? "Not set up").foregroundStyle(Theme.muted)
+                }
             }
         }
     }
