@@ -112,8 +112,11 @@ private struct DayPage: View {
     @Environment(Store.self) private var store
     let date: String
 
+    @State private var showsTryOn = false
+
     private var plan: Plan? { store.plans.first { $0.date == date } }
     private var isStyling: Bool { store.planningDates.contains(date) }
+    private var canTryOn: Bool { plan != nil && !isStyling && store.config?.hasModelReference == true }
 
     /// Parts the outfit being styled will have, and ones it may or may not get, from its weather and what the closet holds.
     private var expectedOutfit: (parts: Set<String>, maybe: Set<String>) {
@@ -152,17 +155,32 @@ private struct DayPage: View {
             }
             .padding(.horizontal, 24)
 
+            // The outfit and the try-on share the big space, like the front and back of a piece.
             Group {
                 if isStyling || plan == nil {
                     StylingPlaceholder(expected: expectedOutfit)
+                } else if let plan, showsTryOn, canTryOn {
+                    TryOnPanel(plan: plan).transition(.opacity)
                 } else if let plan {
                     DressedOutfit(items: plan.garmentIds.compactMap(store.item), plan: plan)
                         .id(plan.garmentIds.joined())
+                        .transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.vertical, 12)
             .padding(.horizontal, 32)
+            .animation(.easeInOut(duration: 0.25), value: showsTryOn)
+
+            if canTryOn, let plan {
+                HStack(spacing: 6) {
+                    ChoiceChip(title: "Outfit", selected: !showsTryOn) { showsTryOn = false }
+                    ChoiceChip(title: "On you", symbol: plan.tryOn?.status == "processing" ? "sparkles" : nil, selected: showsTryOn) { showsTryOn = true }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, 14)
+                .sensoryFeedback(.selection, trigger: showsTryOn)
+            }
 
             Group {
                 if let plan, !isStyling {
@@ -182,6 +200,8 @@ private struct DayPage: View {
         }
         .padding(.bottom, 16)
         .animation(Theme.spring, value: isStyling)
+        // A restyle is a different outfit; show it first.
+        .onChange(of: plan?.garmentIds) { showsTryOn = false }
     }
 }
 
@@ -212,24 +232,42 @@ private struct DayDetails: View {
 
     private var inLaundry: [Item] { plan.garmentIds.compactMap(store.item).filter { !$0.isAvailable } }
 
+    @State private var expanded = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(plan.name).font(.display(26)).lineLimit(2).minimumScaleFactor(0.85)
-                Text(plan.reason).font(.subheadline).foregroundStyle(Theme.muted)
-                    .lineLimit(5).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 12) {
+            // The reason starts folded so the outfit gets the room; tap the name to read why it works.
+            Button {
+                withAnimation(Theme.spring) { expanded.toggle() }
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(plan.name).font(.display(26)).lineLimit(2).minimumScaleFactor(0.85).multilineTextAlignment(.leading)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.down").font(.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
+                    }
+                    if expanded {
+                        Text(plan.reason).font(.subheadline).foregroundStyle(Theme.muted)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+                .foregroundStyle(Theme.ink)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHint(expanded ? "Hides why it works" : "Shows why it works")
             if !inLaundry.isEmpty {
-                Label("\(inLaundry.map(\.name).formatted()) in the wash", systemImage: "washer")
-                    .font(.footnote.weight(.medium)).foregroundStyle(Theme.ink)
-            }
-            HStack(spacing: 10) {
-                if !inLaundry.isEmpty {
+                HStack(spacing: 10) {
+                    Label("\(inLaundry.map(\.name).formatted()) in the wash", systemImage: "washer")
+                        .font(.footnote.weight(.medium)).foregroundStyle(Theme.ink)
+                    Spacer(minLength: 0)
                     // Something is in the wash, so restyling becomes the obvious next step.
                     Button("Restyle", systemImage: "sparkles") { Task { await store.generate([PlanDay(plan)]) } }
                         .buttonStyle(QuietButtonStyle())
                 }
-                if store.config?.hasModelReference == true { TryOnControl(plan: plan) }
             }
         }
     }
@@ -365,8 +403,8 @@ private struct StylingPlaceholder: View {
     }
 }
 
-/// Try-on in the details row: ask for one, watch it work with the AI's status, then open the result.
-private struct TryOnControl: View {
+/// The "On you" side of a day: the try-on photo (tap to open it full screen), its progress, or the button to make one.
+private struct TryOnPanel: View {
     @Environment(Store.self) private var store
     @Namespace private var zoom
     @State private var showing = false
@@ -377,50 +415,41 @@ private struct TryOnControl: View {
             switch plan.tryOn?.status {
             case "ready":
                 Button { showing = true } label: {
-                    HStack(spacing: 10) {
-                        AsyncImage(url: store.url(plan.tryOn?.image, width: 300), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
-                            if case .success(let image) = phase { image.resizable().scaledToFill().transition(.opacity) } else { Theme.ink.opacity(0.06) }
-                        }
-                        .frame(width: 30, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        Text("See it on you").font(.subheadline.weight(.medium))
+                    AsyncImage(url: store.url(plan.tryOn?.image, width: 1200), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                        if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
                     }
-                    .foregroundStyle(Theme.ink)
-                    .padding(.leading, 7).padding(.trailing, 16)
-                    .frame(minHeight: 52)
-                    .background(Theme.ink.opacity(0.06), in: Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .buttonStyle(PressableStyle())
                 .matchedTransitionSource(id: plan.date, in: zoom)
-                .accessibilityLabel("See \(plan.name) on you")
+                .accessibilityLabel("You wearing \(plan.name)")
+                .accessibilityHint("Opens it full screen")
             case "processing":
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles").symbolEffect(.pulse)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Dressing you…").font(.subheadline.weight(.medium))
-                        if let status = store.progress["tryon:\(plan.date)"] {
-                            Text(status).font(.caption).foregroundStyle(Theme.muted).lineLimit(1).contentTransition(.opacity)
-                        }
-                    }
+                VStack(spacing: 12) {
+                    Image(systemName: "sparkles").font(.system(size: 34, weight: .light)).symbolEffect(.pulse)
+                    Text("Dressing you…").font(.display(24))
+                    Text(store.progress["tryon:\(plan.date)"] ?? "This takes about a minute.")
+                        .font(.subheadline).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3)
+                        .contentTransition(.opacity)
                 }
                 .foregroundStyle(Theme.ink)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 52)
-                .background(Theme.ink.opacity(0.06), in: Capsule())
                 .animation(.easeInOut(duration: 0.25), value: store.progress["tryon:\(plan.date)"])
             default:
-                VStack(alignment: .leading, spacing: 6) {
-                    Button(plan.tryOn?.status == "failed" ? "Try on again" : "Try it on", systemImage: "person.crop.rectangle") {
-                        Task { await store.tryOn(plan) }
-                    }
-                    .buttonStyle(QuietButtonStyle())
-                    .accessibilityHint("Makes a photo of you wearing this outfit")
+                VStack(spacing: 14) {
+                    Image(systemName: "person.crop.rectangle").font(.system(size: 40, weight: .thin)).foregroundStyle(Theme.muted)
+                    Text(plan.tryOn?.status == "failed" ? "That try-on didn't work" : "See this outfit on you").font(.display(24))
                     if plan.tryOn?.status == "failed", let error = plan.tryOn?.error {
-                        Text(error).font(.caption).foregroundStyle(Theme.muted).lineLimit(2)
+                        Text(error).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).lineLimit(3)
                     }
+                    Button(plan.tryOn?.status == "failed" ? "Try again" : "Try it on") { Task { await store.tryOn(plan) } }
+                        .buttonStyle(QuietButtonStyle())
+                        .accessibilityHint("Makes a photo of you wearing this outfit")
                 }
+                .foregroundStyle(Theme.ink)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(Theme.spring, value: plan.tryOn?.status)
         .sensoryFeedback(.success, trigger: plan.tryOn?.status == "ready")
         .fullScreenCover(isPresented: $showing) {
