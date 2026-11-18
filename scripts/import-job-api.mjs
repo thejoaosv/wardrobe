@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
 import { reviewCutout, reviewDetection, reviewWorn, untilApproved, withFeedback } from "./ai-review.mjs";
@@ -98,13 +100,16 @@ async function normalizeImage(bytes) {
   return sharp(bytes).rotate().resize(2048, 2048, { fit: "inside", withoutEnlargement: true }).toColorspace("srgb").png().toBuffer();
 }
 
+// Photos kept on disk have no alpha to keep, so JPEG stores them in a fraction of the PNG's size. Cutouts stay PNG.
+const photoJpeg = (bytes) => sharp(bytes).flatten({ background: "#ffffff" }).jpeg({ quality: 90 }).toBuffer();
+
 const previewWidth = (url) => {
   const width = Number(url.searchParams.get("w"));
   return Number.isInteger(width) && width >= 64 && width <= 2048 ? width : null;
 };
 
-async function cropDetectedItem(bytes, boundingBox) {
-  const normalized = await normalizeImage(bytes);
+// bytes is the already normalized photo.
+async function cropDetectedItem(normalized, boundingBox) {
   const { width, height } = await sharp(normalized).metadata();
   const box = normalizeBoundingBox(boundingBox);
   const rawLeft = (box.x / 1000) * width;
@@ -119,18 +124,18 @@ async function cropDetectedItem(bytes, boundingBox) {
   return sharp(normalized).extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }).png().toBuffer();
 }
 
-function chooseChromaKey(primary = "#808080") {
-  const value = HEX_COLOR.test(primary) ? primary : "#808080";
-  const source = [1, 3, 5].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16));
+// The key farthest from both of the garment's colors, so a white tee's green logo doesn't get a green backdrop.
+export function chooseChromaKey(primary = "#808080", secondary = null) {
+  const colors = [primary, secondary].filter((value) => HEX_COLOR.test(value || ""));
+  const sources = (colors.length ? colors : ["#808080"]).map((value) => [1, 3, 5].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16)));
   const candidates = [[0, 255, 0], [255, 0, 255], [0, 255, 255]];
-  const selected = candidates.sort((a, b) => {
-    const distance = (color) => color.reduce((total, channel, index) => total + ((channel - source[index]) ** 2), 0);
-    return distance(b) - distance(a);
-  })[0];
+  const distance = (color) => Math.min(...sources.map((source) => color.reduce((total, channel, index) => total + ((channel - source[index]) ** 2), 0)));
+  const selected = candidates.sort((a, b) => distance(b) - distance(a))[0];
   return `#${selected.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export function buildGarmentPrompt(metadata = {}, chromaKey = "#00ff00", { transparent = false } = {}) {
+// side "back" makes Image 2 the existing front cutout; fromCutout means Image 1 is the piece's current cutout, not a photo.
+export function buildGarmentPrompt(metadata = {}, chromaKey = "#00ff00", { transparent = false, side = "front", fromCutout = false } = {}) {
   const name = metadata.name || "clothing item";
   const category = metadata.part || "wardrobe item";
   const primary = metadata.color || "the exact visible color";
@@ -142,13 +147,20 @@ export function buildGarmentPrompt(metadata = {}, chromaKey = "#00ff00", { trans
     ? `\n\nText on the garment: ${metadata.text}. Reproduce every word letter for letter with the same font style, size and placement. Never substitute a different or more familiar word.`
     : "";
   const description = metadata.description ? `\nDescription: ${metadata.description}` : "";
+  const subject = side === "back" ? "the BACK of this garment" : "this garment";
+  const first = fromCutout
+    ? `Image 1 is the current cutout of ${subject}. Recreate the same real garment as a cleaner cutout; where its text or details contradict the description and text below, follow the description and text.`
+    : `Image 1 is the photo the user selected of ${subject}, cropped to it, either by itself or worn by a person.`;
+  const second = side === "back"
+    ? " Image 2 is the existing front cutout of the same garment: keep color, material and proportions consistent with it, but do not copy front-only details such as buttons, plackets or chest graphics onto the back."
+    : fromCutout ? "" : " Image 2, when present, is the full selected photo for context on true color, texture and how the garment sits.";
 
   return `Use case: background-extraction
 Asset type: ecommerce catalog product cutout source
 
-Input images: Image 1 is the photo the user selected, cropped to this garment, either by itself or worn by a person. Image 2, when present, is the full selected photo for context on true color, texture and how the garment sits. Reconstruct exactly this real garment from them; do not design a new one.
+Input images: ${first}${second} Reconstruct exactly this real garment from them; do not design a new one.
 
-Primary request: Reconstruct ONLY the complete empty ${name} (${category}) as a clean, front-facing ecommerce catalog product photograph. If a wearer is present, remove them. Remove every other garment, object, and background element. Show the complete item with no person, body, mannequin, or hanger visible.
+Primary request: Reconstruct ONLY the complete empty ${name} (${category}) as a clean, ${side === "back" ? "straight-on back view" : "front-facing"} ecommerce catalog product photograph. If a wearer is present, remove them. Remove every other garment, object, and background element. Show the complete item with no person, body, mannequin, or hanger visible.
 
 Straighten: Lay the garment out straight and symmetrical, as if freshly steamed and neatly flat-laid. Smooth away wrinkles, creases and folds that come from how it was photographed, untwist it, and extend sleeves, legs, hoods, collars and hems naturally instead of bunched, folded over or tucked. Keep features that belong to the garment itself, such as pleats, ribbing, distressing, quilting or an intentionally crinkled fabric.
 
@@ -188,6 +200,62 @@ function removeKeyedSpill(data, index, keyedChannels, neutralLevel) {
   }
 }
 
+// Marks the backdrop and the pixels around it: everything reachable from a fully transparent pixel through pixels
+// that look like backdrop (keyish(index), e.g. shading of the key color), plus `radius` px around that for the
+// blended edge. Chroma spill can only sit there; cleaning it anywhere else eats into the garment itself, e.g. navy
+// turning see-through on a magenta key or a white tee's green logo being punched out.
+export function edgeBand(data, width, height, keyish = () => false, radius = 4) {
+  const size = width * height;
+  const region = new Uint8Array(size);
+  const queue = new Int32Array(size);
+  let head = 0;
+  let tail = 0;
+  for (let pixel = 0; pixel < size; pixel += 1) if (data[pixel * 4 + 3] === 0) { region[pixel] = 1; queue[tail++] = pixel; }
+  const visit = (next) => {
+    if (region[next] || !keyish(next * 4)) return;
+    region[next] = 1;
+    queue[tail++] = next;
+  };
+  while (head < tail) {
+    const pixel = queue[head++];
+    const x = pixel % width;
+    if (x > 0) visit(pixel - 1);
+    if (x < width - 1) visit(pixel + 1);
+    if (pixel >= width) visit(pixel - width);
+    if (pixel < size - width) visit(pixel + width);
+  }
+  // A sliding-window count along each row, then along each column of that, is a square dilation in linear time.
+  const dilate = (source, length, lines, at) => {
+    const out = new Uint8Array(source.length);
+    for (let line = 0; line < lines; line += 1) {
+      let count = 0;
+      for (let index = 0; index < Math.min(radius, length); index += 1) count += source[at(line, index)];
+      for (let index = 0; index < length; index += 1) {
+        if (index + radius < length) count += source[at(line, index + radius)];
+        if (index - radius - 1 >= 0) count -= source[at(line, index - radius - 1)];
+        out[at(line, index)] = count > 0 ? 1 : 0;
+      }
+    }
+    return out;
+  };
+  return dilate(dilate(region, width, height, (y, x) => y * width + x), height, width, (x, y) => y * width + x);
+}
+
+// How far a pixel leans toward the key's channels; garments' own colors stay well below STRONG_SPILL.
+const spillAt = (data, index, keyedChannels, neutralChannels) => keyedChannels.reduce((total, channel) => total + data[index + channel], 0) / keyedChannels.length
+  - neutralChannels.reduce((total, channel) => total + data[index + channel], 0) / neutralChannels.length;
+const STRONG_SPILL = 60;
+
+// Removes keyed spill from the opaque pixels of an RGBA buffer that sit in the edge band.
+function removeEdgeSpill(data, band, keyedChannels, neutralChannels) {
+  for (let index = 0; index < data.length; index += 4) {
+    if (data[index + 3] === 0 || !band[index / 4]) continue;
+    const keyedLevel = keyedChannels.reduce((total, channel) => total + data[index + channel], 0) / keyedChannels.length;
+    const neutralLevel = neutralChannels.reduce((total, channel) => total + data[index + channel], 0) / neutralChannels.length;
+    if (keyedLevel - neutralLevel > 0) removeKeyedSpill(data, index, keyedChannels, neutralLevel);
+  }
+}
+
 export async function processChromaBackground(bytes, key, options = {}) {
   const tolerance = cleanupTolerance(options.tolerance);
   const feather = 80;
@@ -195,55 +263,35 @@ export async function processChromaBackground(bytes, key, options = {}) {
   const keyedChannels = target.map((channel, index) => channel > 200 ? index : null).filter((index) => index !== null);
   const neutralChannels = target.map((channel, index) => channel < 55 ? index : null).filter((index) => index !== null);
   const { data, info } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const keyDistance = (index) => Math.sqrt(
+    ((data[index] - target[0]) ** 2)
+    + ((data[index + 1] - target[1]) ** 2)
+    + ((data[index + 2] - target[2]) ** 2),
+  );
+  // The backdrop goes first, so the band around it can be found; feathering and spill only touch that band.
+  for (let index = 0; index < data.length; index += 4) if (keyDistance(index) <= tolerance) data.fill(0, index, index + 4);
+  // Backdrop shading beyond the tolerance is reached through near-key or strongly key-tinted pixels.
+  const band = edgeBand(data, info.width, info.height, (index) => keyDistance(index) < tolerance + feather || spillAt(data, index, keyedChannels, neutralChannels) > STRONG_SPILL);
   for (let index = 0; index < data.length; index += 4) {
-    const distance = Math.sqrt(
-      ((data[index] - target[0]) ** 2)
-      + ((data[index + 1] - target[1]) ** 2)
-      + ((data[index + 2] - target[2]) ** 2),
-    );
-    if (distance <= tolerance) {
-      data[index] = 0;
-      data[index + 1] = 0;
-      data[index + 2] = 0;
-      data[index + 3] = 0;
-    } else {
-      if (distance < tolerance + feather) data[index + 3] = Math.round(data[index + 3] * ((distance - tolerance) / feather));
-      const keyedLevel = keyedChannels.reduce((total, channel) => total + data[index + channel], 0) / keyedChannels.length;
-      const neutralLevel = neutralChannels.reduce((total, channel) => total + data[index + channel], 0) / neutralChannels.length;
-      const spill = Math.max(0, keyedLevel - neutralLevel);
-      if (spill > 0) {
-        const spillAlpha = Math.max(0, 1 - (Math.max(0, spill - 4) / 150));
-        data[index + 3] = Math.round(data[index + 3] * spillAlpha);
-        removeKeyedSpill(data, index, keyedChannels, neutralLevel);
-      }
-      if (data[index + 3] <= 8) {
-        data[index] = 0;
-        data[index + 1] = 0;
-        data[index + 2] = 0;
-        data[index + 3] = 0;
-      }
-    }
-  }
-  for (let index = 0; index < data.length; index += 4) {
-    if (data[index + 3] === 0) continue;
+    if (data[index + 3] === 0 || !band[index / 4]) continue;
+    const distance = keyDistance(index);
+    if (distance < tolerance + feather) data[index + 3] = Math.round(data[index + 3] * ((distance - tolerance) / feather));
     const keyedLevel = keyedChannels.reduce((total, channel) => total + data[index + channel], 0) / keyedChannels.length;
     const neutralLevel = neutralChannels.reduce((total, channel) => total + data[index + channel], 0) / neutralChannels.length;
-    const residualSpill = Math.max(0, keyedLevel - neutralLevel);
-    if (residualSpill > 0) {
+    const spill = Math.max(0, keyedLevel - neutralLevel);
+    if (spill > 0) {
+      const spillAlpha = Math.max(0, 1 - (Math.max(0, spill - 4) / 150));
+      data[index + 3] = Math.round(data[index + 3] * spillAlpha);
       removeKeyedSpill(data, index, keyedChannels, neutralLevel);
     }
+    if (data[index + 3] <= 8) data.fill(0, index, index + 4);
   }
+  removeEdgeSpill(data, band, keyedChannels, neutralChannels);
   const keyedOutput = await sharp(data, { raw: info }).png().toBuffer();
   const framedOutput = await frameTransparentGarment(keyedOutput);
   const { data: framedData, info: framedInfo } = await sharp(framedOutput).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  for (let index = 0; index < framedData.length; index += 4) {
-    if (framedData[index + 3] === 0) continue;
-    const keyedLevel = keyedChannels.reduce((total, channel) => total + framedData[index + channel], 0) / keyedChannels.length;
-    const neutralLevel = neutralChannels.reduce((total, channel) => total + framedData[index + channel], 0) / neutralChannels.length;
-    const residualSpill = Math.max(0, keyedLevel - neutralLevel);
-    if (residualSpill <= 0) continue;
-    removeKeyedSpill(framedData, index, keyedChannels, neutralLevel);
-  }
+  // Resizing into the frame blends edge pixels again.
+  removeEdgeSpill(framedData, edgeBand(framedData, framedInfo.width, framedInfo.height, (index) => spillAt(framedData, index, keyedChannels, neutralChannels) > STRONG_SPILL), keyedChannels, neutralChannels);
   const output = await sharp(framedData, { raw: framedInfo }).png().toBuffer();
   const verification = await verifyNoChromaSpill(output, key);
   return { bytes: output, verification, tolerance };
@@ -295,11 +343,13 @@ async function verifyNoChromaSpill(bytes, key) {
   const target = [1, 3, 5].map((offset) => Number.parseInt(key.slice(offset, offset + 2), 16));
   const keyedChannels = target.map((channel, index) => channel > 200 ? index : null).filter((index) => index !== null);
   const neutralChannels = target.map((channel, index) => channel < 55 ? index : null).filter((index) => index !== null);
-  const { data } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  // Only the backdrop's edge can carry spill; the garment's own colors may lean toward the key.
+  const band = edgeBand(data, info.width, info.height, (index) => spillAt(data, index, keyedChannels, neutralChannels) > STRONG_SPILL);
   let contaminatedPixels = 0;
   let maxSpill = 0;
   for (let index = 0; index < data.length; index += 4) {
-    if (data[index + 3] === 0) continue;
+    if (data[index + 3] === 0 || !band[index / 4]) continue;
     const keyedLevel = keyedChannels.reduce((total, channel) => total + data[index + channel], 0) / keyedChannels.length;
     const neutralLevel = neutralChannels.reduce((total, channel) => total + data[index + channel], 0) / neutralChannels.length;
     const spill = Math.max(0, keyedLevel - neutralLevel);
@@ -345,6 +395,9 @@ export function tryOnReferences(garments) {
   return garments.map((item) => ({ item, side: "front", image: item.image }));
 }
 
+// One try-on per day and outfit: a restyled day's new outfit starts its own instead of waiting on the stale one.
+export const tryOnLock = (date, garmentIds) => `try-on:${date}:${garmentIds.join("+")}`;
+
 const LAYER_ORDER = ["upperbody", "midlayer", "wholebody_up", "lowerbody", "shoes", "accessories_up"];
 const SCENES = { warm: "a sunny, warm day outdoors", mild: "a bright, mild day", cold: "a crisp, cold day with soft winter light", rain: "an overcast, rainy-looking day on damp pavement, without rain drops on the lens" };
 
@@ -383,7 +436,14 @@ Avoid: a different face or hairstyle, a new pose or back view, any of the origin
 
 async function atomicJson(file, value) {
   const tmp = `${file}.${randomUUID()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  // Flushed before the rename, so a power cut can't leave a renamed but empty file.
+  const handle = await open(tmp, "w");
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   try {
     await rename(tmp, file);
   } catch (error) {
@@ -466,8 +526,13 @@ export function wardrobeImportApi(options = {}) {
   const jobLock = (shared.jobLock ??= createKeyedLock());
   // Photos being searched for clothes in the background, by id. Their photo stays on disk until done, so a restart resumes them.
   const detections = (shared.detections ??= new Map());
+  // Detections that finished and left the list, by id, so a retried upload doesn't search the same photo again.
+  const finishedDetections = (shared.finishedDetections ??= new Map());
   // Days being styled in the background, by date; a failure stays until the app has seen it.
   const styling = (shared.styling ??= new Map());
+  // One stylist at a time: each plans against the outfits the previous one saved, and Codex isn't flooded.
+  const planQueue = (shared.planQueue ??= createQueue(1));
+  let stylingDir;
   // Small WebP previews of stored PNGs, keyed by file, width and change time.
   const previews = (shared.previews ??= new Map());
   let detectionsDir;
@@ -477,6 +542,9 @@ export function wardrobeImportApi(options = {}) {
   const waiting = (key) => (ahead) => say(key, ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…");
   const queued = (key, task) => imageQueue(() => { say(key, null); return task(); }, waiting(key));
   const retrying = (key, total) => (problems, attempt) => say(key, `Retrying (${attempt}/${total}): ${problems[0]}`);
+  // Background work nobody awaits: a rejection would otherwise be unhandled and stop the whole server.
+  const logFailure = (what) => (error) => console.error(`${what} failed: ${error.message}`);
+  const cancelled = () => Object.assign(new Error("No longer wanted"), { cancelled: true });
   const libraryFile = (url) => path.join(libraryAssetDir, path.basename(url));
   let settingsFile;
 
@@ -552,7 +620,12 @@ export function wardrobeImportApi(options = {}) {
   async function loadJob(id) {
     if (!/^[a-f0-9-]{36}$/i.test(id)) return null;
     try { return JSON.parse(await readFile(path.join(jobsDir, id, "job.json"), "utf8")); }
-    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    catch (error) {
+      if (error.code === "ENOENT") return null;
+      // One damaged job must not take the list or the server's startup down with it; its folder is left for inspection.
+      if (error instanceof SyntaxError) { console.warn(`Skipping unreadable job ${id}: ${error.message}`); return null; }
+      throw error;
+    }
   }
 
   async function saveJob(job) {
@@ -616,11 +689,14 @@ export function wardrobeImportApi(options = {}) {
     const prompt = buildPlanPrompt({ items, days, history: historyFor(plans, days.map((day) => day.date)) });
     const report = (message) => days.forEach((day) => say(`plan:${day.date}`, message));
     let planned;
+    let leftover;
+    // The stylist sees what it chose last time next to the rules that choice broke, so it can fix those days instead of starting over.
+    let previous = null;
     try {
-      ({ result: planned } = await untilApproved({
+      ({ result: planned, problems: leftover } = await untilApproved({
         attempts: PLAN_ATTEMPTS,
-        make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\nA previous attempt broke these rules; avoid them: ${feedback.join("; ")}.` : prompt, schema: planSchema, effort: setting("PLANNER_REASONING_EFFORT", "medium") })
-          .then((result) => validatePlan(result, { items, days })),
+        make: (feedback) => ai.json({ prompt: feedback.length ? `${prompt}\n\n${previous ? `Your previous attempt: ${JSON.stringify(previous.map(({ date, garmentIds }) => ({ date, garmentIds })))}\n` : ""}It broke these rules; fix them: ${feedback.join("; ")}.` : prompt, schema: planSchema, effort: setting("PLANNER_REASONING_EFFORT", "medium") })
+          .then((result) => (previous = validatePlan(result, { items, days }))),
         check: (planned) => {
           const fresh = planned.filter((plan) => !days.find((day) => day.date === plan.date)?.replace);
           return [...planIssues(plans, planned, items), ...swapIssues(days, planned, library), ...layerIssues(days, planned, items), ...includeIssues(days, planned),
@@ -634,6 +710,7 @@ export function wardrobeImportApi(options = {}) {
     } finally {
       report(null);
     }
+    if (leftover.length) console.warn(`Planned ${days.map((day) => day.date).join(", ")} with soft rules still broken: ${leftover.join("; ")}`);
     // Repeats are soft rules, but a swap that changed more than the one piece would overwrite the user's outfit.
     if (swapIssues(days, planned, library).length) throw Object.assign(new Error("The stylist couldn't swap just that piece. Try again."), { status: 502 });
     return serial(async () => {
@@ -690,8 +767,8 @@ export function wardrobeImportApi(options = {}) {
   // Makes a side's cutout again in the background like any other generation: from a new photo, else the photo kept
   // for that side, else its current cutout (older pieces kept no photo). A new photo is kept for the next redo.
   async function startCutout(id, side, input) {
-    // input.photo is a pending upload resumed after a restart.
-    const upload = input.photo || (input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null);
+    // input.photo is a pending upload resumed after a restart, stored as JPEG (older ones as PNG).
+    const upload = input.photo ? await normalizeImage(input.photo) : (input.imageDataUrl || input.imageBase64 ? await normalizeImage(decodeImage(input).data) : null);
     const sourceKey = side === "back" ? "backSourceImage" : "sourceImage";
     const imageKey = side === "back" ? "backImage" : "image";
     if (!upload && side === "back" && !(await loadImported()).find((record) => record.id === id)?.backImage) {
@@ -703,9 +780,9 @@ export function wardrobeImportApi(options = {}) {
     // Reserved before any await so a second request can't start a duplicate generation.
     running.set(lock, null);
     // A new photo is saved first, so a restart can still finish this cutout.
-    const pendingFile = upload ? `${id}-${side}-pending.png` : null;
+    const pendingFile = upload ? `${id}-${side}-pending.jpg` : null;
     const record = await (async () => {
-      if (pendingFile) await writeFile(libraryFile(pendingFile), upload);
+      if (pendingFile) await writeFile(libraryFile(pendingFile), await photoJpeg(upload));
       return updateRecord(id, (record) => { record[side] = { status: "processing", pending: pendingFile, direction: direction || null }; });
     })().catch((error) => { running.delete(lock); throw error; });
     if (!record) {
@@ -715,7 +792,7 @@ export function wardrobeImportApi(options = {}) {
     const key = `cutout:${id}`;
     const task = queued(key, async () => {
       try {
-        const chromaKey = chooseChromaKey(record.color);
+        const chromaKey = chooseChromaKey(record.color, record.secondaryColor);
         const transparent = (await ai.status()).provider === "codex";
         const front = await normalizeImage(await readFile(libraryFile(record.image)));
         const current = side === "front" ? front : record.backImage ? await readFile(libraryFile(record.backImage)).then(normalizeImage) : null;
@@ -724,16 +801,18 @@ export function wardrobeImportApi(options = {}) {
         const fromCutout = photo === current;
         // The front's text describes the front only; the back photo speaks for itself.
         const metadata = side === "back" ? { ...record, name: `${record.name}, back view`, text: record.backText || "" } : record;
-        let prompt = buildGarmentPrompt(metadata, chromaKey, { transparent });
-        if (side === "back") prompt += "\n\nBack view: Image 1 shows the BACK of this garment. Reconstruct the garment as seen from behind, exactly as in Image 1. Image 2 is the existing front cutout of the same garment: keep color, material and proportions consistent with it, but do not copy front-only details such as buttons, plackets or chest graphics onto the back.";
-        if (fromCutout) prompt += "\n\nImage 1 is this piece's current cutout. Recreate the same real garment as a cleaner cutout, and where its text or details contradict the description and text above, follow the description and text.";
+        let prompt = buildGarmentPrompt(metadata, chromaKey, { transparent, side, fromCutout });
         if (direction) prompt += `\nUser regeneration direction: ${direction}`;
         const images = side === "back"
           ? [{ data: photo, role: fromCutout ? "the current cutout of the back of the garment to recreate" : "the user's photo of the back of the garment; reproduce this exact back" }, { data: front, role: "the existing front cutout of the same garment, for consistency only" }]
           : [{ data: photo, role: fromCutout ? "the current cutout of the garment to recreate" : "the user's photo of the garment; reproduce this exact garment" }];
         const { result, problems } = await reviewed({
           attempts: CUTOUT_ATTEMPTS,
-          make: async (feedback) => cleanCutout(await ai.editImage({ size: "1024x1024", quality: setting("OPENAI_IMAGE_QUALITY", "high"), transparent, prompt: withFeedback(prompt, feedback), images }), chromaKey),
+          make: async (feedback) => {
+            // Deleted, or its back removed, while it waited or retried.
+            if ((await loadImported()).find((item) => item.id === id)?.[side]?.status !== "processing") throw cancelled();
+            return cleanCutout(await ai.editImage({ size: "1024x1024", quality: setting("OPENAI_IMAGE_QUALITY", "high"), transparent, prompt: withFeedback(prompt, feedback), images }), chromaKey);
+          },
           check: (cutout) => { say(key, "Checking the cutout…"); return reviewCutout(ai, { photo, cutout, metadata, side, referenceIsCutout: fromCutout }); },
           onRetry: retrying(key, CUTOUT_ATTEMPTS),
         });
@@ -745,7 +824,7 @@ export function wardrobeImportApi(options = {}) {
         }
         const stamp = Date.now();
         const file = `${id}-${side === "back" ? "back" : "garment"}-${stamp}.png`;
-        const sourceFile = upload ? `${id}-${side}-source-${stamp}.png` : null;
+        const sourceFile = upload ? `${id}-${side}-source-${stamp}${path.extname(pendingFile)}` : null;
         await writeFile(path.join(libraryAssetDir, file), result);
         if (sourceFile) await rename(libraryFile(pendingFile), libraryFile(sourceFile));
         // removeBack clears the processing status; then this result is stale and is thrown away.
@@ -772,7 +851,7 @@ export function wardrobeImportApi(options = {}) {
       } finally {
         say(key, null);
       }
-    }).finally(() => running.delete(lock));
+    }).catch(logFailure(`The ${side} cutout of ${id}`)).finally(() => running.delete(lock));
     running.set(lock, task);
     return record;
   }
@@ -796,12 +875,12 @@ export function wardrobeImportApi(options = {}) {
   }
 
   // A close-up of the user's head from the reference photo, where the face is often small; cached until the photo changes.
-  // null when the AI can't find a face, and try-ons go on without it.
+  // null when the AI can't find a face, and try-ons go on without it; an empty cache file remembers that for this photo.
   async function readFaceReference(reference) {
     const modelPath = path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png"));
     const facePath = modelPath.replace(/(\.[a-z]+)?$/i, "-face.png");
     const [photo, cached] = await Promise.all([stat(modelPath), stat(facePath).catch(() => null)]);
-    if (cached && cached.mtimeMs >= photo.mtimeMs) return readFile(facePath);
+    if (cached && cached.mtimeMs >= photo.mtimeMs) return cached.size ? readFile(facePath) : null;
     try {
       const source = await sharp(reference).rotate().png().toBuffer();
       const { width, height } = await sharp(source).metadata();
@@ -812,7 +891,7 @@ export function wardrobeImportApi(options = {}) {
       const left = Math.max(0, Math.round((box.x + box.width / 2) * width / 1000 - side / 2));
       const top = Math.max(0, Math.round((box.y + box.height / 2) * height / 1000 - side / 2));
       const size = Math.round(Math.min(side, width - left, height - top));
-      if (size < 32) return null;
+      if (size < 32) { await writeFile(facePath, ""); return null; }
       const face = await sharp(source).extract({ left, top, width: size, height: size }).resize(768, 768, { kernel: "lanczos3" }).png().toBuffer();
       await writeFile(facePath, face);
       return face;
@@ -844,7 +923,7 @@ export function wardrobeImportApi(options = {}) {
     const library = await loadImported();
     const garments = plan.garmentIds.map((id) => library.find((item) => item.id === id));
     if (garments.some((item) => !item?.image)) throw Object.assign(new Error("A piece in this outfit was removed. Restyle the day first."), { status: 409 });
-    const lock = `try-on:${date}`;
+    const lock = tryOnLock(date, plan.garmentIds);
     if (!running.has(lock)) {
       // Reserved before any await so a second request can't start a duplicate generation.
       running.set(lock, null);
@@ -860,10 +939,14 @@ export function wardrobeImportApi(options = {}) {
           if (sheet) images.push({ data: await garmentSheet(cutouts), role: "reference sheet of every garment to wear, numbered" });
           else garments.forEach((item, index) => images.push({ data: cutouts[index], role: `exact ${PART_NAMES[item.part] || "garment"} to wear: ${item.name} (transparent cutout)` }));
           const inputs = await Promise.all(images.map(async (image) => ({ ...image, data: await normalizeImage(image.data) })));
-          const worn = await Promise.all(garments.map(async (item) => ({ name: item.name, text: item.text, image: await readFile(libraryFile(item.image)) })));
+          const worn = garments.map((item, index) => ({ name: item.name, text: item.text, image: cutouts[index] }));
           const { result: bytes, problems } = await reviewed({
             attempts: TRY_ON_ATTEMPTS,
-            make: (feedback) => ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments, { face: Boolean(face), sheet }), feedback) }),
+            make: async (feedback) => {
+              // Restyled or removed while it waited or retried: the result would only be thrown away.
+              if ((await loadPlans())[date]?.garmentIds.join("+") !== key) throw cancelled();
+              return ai.editImage({ size: "1024x1536", quality: setting("OPENAI_IMAGE_QUALITY", "high"), images: inputs, prompt: withFeedback(buildTryOnPrompt(plan, garments, { face: Boolean(face), sheet }), feedback) });
+            },
             check: (image) => { say(status, "Checking the photo…"); return reviewWorn(ai, { person: reference, face, image, garments: worn }); },
             onRetry: retrying(status, TRY_ON_ATTEMPTS),
           });
@@ -876,16 +959,18 @@ export function wardrobeImportApi(options = {}) {
         } finally {
           say(status, null);
         }
-      }).finally(() => running.delete(lock));
+      }).catch(logFailure(`The try-on for ${date}`)).finally(() => running.delete(lock));
       running.set(lock, task);
     }
     return planList(await loadPlans());
   }
 
   // Held open until every running generation finishes (capped), so a phone's background download can wake it.
-  async function waitForWork(since) {
+  // gone() is true once the client hung up, so an abandoned wait stops instead of looping for ten minutes.
+  async function waitForWork(since, gone = () => false) {
     const started = Date.now();
-    while (running.size && Date.now() - started < 10 * 60 * 1000) await new Promise((resolve) => setTimeout(resolve, 2000));
+    while (running.size && !gone() && Date.now() - started < 10 * 60 * 1000) await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (gone()) return null;
     // Taken before reading results: the next wait starts here, so nothing finishing in between is missed.
     const cursor = Date.now();
     const ids = await readdir(jobsDir).catch(() => []);
@@ -900,20 +985,21 @@ export function wardrobeImportApi(options = {}) {
     return { busy: running.size > 0, reviews, tryOns, backs, cursor };
   }
 
-  // One review job per detected piece, starting at its crop.
+  // One review job per detected piece, starting at its crop. The full photo is only context, so each job keeps it as JPEG.
   async function createJobs(photo, detected) {
     const jobs = [];
+    const original = detected.length ? await photoJpeg(photo) : null;
     for (const { metadata, crop } of detected) {
       const id = randomUUID();
       const dir = path.join(jobsDir, id);
       await mkdir(dir, { recursive: true });
-      const originalFile = "original.png";
+      const originalFile = "original.jpg";
       const cropFile = "crop.png";
-      await writeFile(path.join(dir, originalFile), photo);
+      await writeFile(path.join(dir, originalFile), original);
       await writeFile(path.join(dir, cropFile), crop);
       const now = new Date().toISOString();
       const cropStage = { ...stageState(), status: "review", assetUrl: `${ASSET_ROOT}/${id}/${cropFile}`, updatedAt: now };
-      const job = { id, status: "active", metadata, stages: { crop: cropStage, garment: stageState(), modeled: stageState() }, createdAt: now, updatedAt: now, internal: { originalFile, cropFile, originalMime: "image/png" } };
+      const job = { id, status: "active", metadata, stages: { crop: cropStage, garment: stageState(), modeled: stageState() }, createdAt: now, updatedAt: now, internal: { originalFile, cropFile, originalMime: "image/jpeg" } };
       job.originalAssetUrl = `${ASSET_ROOT}/${id}/${originalFile}`;
       await saveJob(job);
       jobs.push(job);
@@ -926,13 +1012,16 @@ export function wardrobeImportApi(options = {}) {
   async function startDetection(photo, clientId) {
     const id = clientId || randomUUID();
     if (detections.has(id)) return detections.get(id);
+    if (finishedDetections.has(id)) return finishedDetections.get(id);
+    // Listed before the photo is saved, so a retry arriving meanwhile joins this detection.
+    const detection = { id, status: "working", message: null, found: 0, error: null, updatedAt: Date.now() };
+    detections.set(id, detection);
     const file = path.join(detectionsDir, `${id}.png`);
-    await writeFile(file, photo);
-    return runDetection(id, file, photo);
+    await writeFile(file, photo).catch((error) => { detections.delete(id); throw error; });
+    return runDetection(id, file, photo, detection);
   }
 
-  function runDetection(id, file, photo) {
-    const detection = { id, status: "working", message: null, found: 0, error: null, updatedAt: Date.now() };
+  function runDetection(id, file, photo, detection = { id, status: "working", message: null, found: 0, error: null, updatedAt: Date.now() }) {
     detections.set(id, detection);
     const report = (message) => Object.assign(detection, { message, updatedAt: Date.now() });
     const task = detectQueue(async () => {
@@ -947,50 +1036,76 @@ export function wardrobeImportApi(options = {}) {
       }
     }, (ahead) => report(ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…"));
     running.set(`detect:${id}`, task);
-    task.finally(() => running.delete(`detect:${id}`));
+    task.finally(() => running.delete(`detect:${id}`)).catch(logFailure(`Detection ${id}`));
     return detection;
   }
 
   // Finished detections that found pieces disappear after a minute; failures and empty photos wait to be dismissed.
   function detectionList() {
     for (const [id, detection] of detections) {
-      if (detection.status === "done" && detection.found > 0 && Date.now() - detection.updatedAt > 60 * 1000) detections.delete(id);
+      if (detection.status === "done" && detection.found > 0 && Date.now() - detection.updatedAt > 60 * 1000) {
+        detections.delete(id);
+        finishedDetections.set(id, detection);
+      }
     }
+    for (const [id, detection] of finishedDetections) if (Date.now() - detection.updatedAt > 60 * 60 * 1000) finishedDetections.delete(id);
     return [...detections.values()];
   }
 
-  // Styles days in the background; the app polls the list and the plans.
-  function startStyling(input) {
+  // Runs one stylist at a time, showing the others' place in line on each of their days.
+  function queuedPlan(input) {
+    const dates = Array.isArray(input.days) ? input.days.map((day) => day?.date) : [];
+    const report = (message) => dates.forEach((date) => say(`plan:${date}`, message));
+    return planQueue(() => { report(null); return planOutfits(input); }, (ahead) => report(ahead ? `Waiting in line, ${ahead} ahead…` : "Up next…"));
+  }
+
+  // Styles days in the background; the app polls the list and the plans. The request is kept on disk until it
+  // finishes, so a restart styles those days again instead of silently dropping them.
+  async function startStyling(input, saved = null) {
     const dates = Array.isArray(input.days) ? input.days.map((day) => day?.date) : [];
     if (!dates.length || dates.some((date) => typeof date !== "string" || !DATE.test(date))) throw Object.assign(new Error("Each day needs a YYYY-MM-DD date"), { status: 400 });
     if (dates.some((date) => styling.get(date)?.status === "working")) throw Object.assign(new Error("That day is already being styled"), { status: 409 });
     for (const date of dates) styling.set(date, { date, status: "working", error: null });
+    const file = saved || path.join(stylingDir, `${randomUUID()}.json`);
+    if (!saved) await writeFile(file, JSON.stringify(input)).catch((error) => { dates.forEach((date) => styling.delete(date)); throw error; });
     const key = `plan:${dates.join(",")}`;
-    const task = planOutfits(input).then(
+    const task = queuedPlan(input).then(
       () => dates.forEach((date) => styling.delete(date)),
       (error) => dates.forEach((date) => styling.set(date, { date, status: "failed", error: error.message })),
-    );
+    ).finally(() => rm(file, { force: true }));
     running.set(key, task);
-    task.finally(() => running.delete(key));
+    task.finally(() => running.delete(key)).catch(logFailure(`Styling ${dates.join(", ")}`));
     return [...styling.values()];
   }
 
-  async function sendImage(res, file, width, cacheControl) {
+  // Files that change in place are sent with no-cache and an ETag, so the client revalidates and gets a 304 when unchanged.
+  async function sendImage(req, res, file, width, cacheControl) {
     const info = await stat(file);
+    const etag = `W/"${info.size}-${Math.round(info.mtimeMs)}-${width || 0}"`;
     res.setHeader("Cache-Control", cacheControl);
-    if (!width) {
-      res.setHeader("Content-Type", file.endsWith(".svg") ? "image/svg+xml" : "image/png");
-      return res.end(await readFile(file));
+    res.setHeader("ETag", etag);
+    res.setHeader("Last-Modified", info.mtime.toUTCString());
+    if (req.headers["if-none-match"] === etag) {
+      res.statusCode = 304;
+      return res.end();
     }
+    if (!width) {
+      res.setHeader("Content-Type", ({ ".svg": "image/svg+xml", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" })[path.extname(file).toLowerCase()] || "image/png");
+      res.setHeader("Content-Length", info.size);
+      return pipeline(createReadStream(file), res).catch(() => {});
+    }
+    // Kept as promises, so two requests for the same new preview share one encode. A hit moves to the back (LRU).
+    // shortcut: previews live in memory only, so a restart re-encodes them on first view; add a disk cache if that shows up.
     const cacheKey = `${file}:${width}:${info.mtimeMs}`;
     let bytes = previews.get(cacheKey);
-    if (!bytes) {
-      bytes = await sharp(file).resize({ width, height: width, fit: "inside", withoutEnlargement: true }).webp({ quality: 82 }).toBuffer();
-      previews.set(cacheKey, bytes);
-      if (previews.size > 400) previews.delete(previews.keys().next().value);
-    }
+    if (bytes) previews.delete(cacheKey);
+    else bytes = sharp(file).resize({ width, height: width, fit: "inside", withoutEnlargement: true }).webp({ quality: 82 }).toBuffer();
+    previews.set(cacheKey, bytes);
+    if (previews.size > 400) previews.delete(previews.keys().next().value);
+    // Promise.resolve: an older copy of this plugin (before a Vite restart) cached plain buffers.
+    const data = await Promise.resolve(bytes).catch((error) => { previews.delete(cacheKey); throw error; });
     res.setHeader("Content-Type", "image/webp");
-    return res.end(bytes);
+    return res.end(data);
   }
 
   function persistImported(job, includeModeled = false) {
@@ -1014,9 +1129,9 @@ export function wardrobeImportApi(options = {}) {
       await copyFile(path.join(jobsDir, job.id, modeledSource), path.join(libraryAssetDir, modeledName));
       modeledImage = `${LIBRARY_ASSET_ROOT}/${modeledName}`;
     }
-    // The photo is kept so the cutout can be redone later from the real garment.
-    const sourceName = `${id}-source.png`;
-    await copyFile(path.join(jobsDir, job.id, job.internal.cropFile || job.internal.originalFile), path.join(libraryAssetDir, sourceName));
+    // The photo is kept so the cutout can be redone later from the real garment; it is only ever re-read, so JPEG.
+    const sourceName = `${id}-source.jpg`;
+    await writeFile(path.join(libraryAssetDir, sourceName), await photoJpeg(await readFile(path.join(jobsDir, job.id, job.internal.cropFile || job.internal.originalFile))));
     const metadata = job.metadata || {};
     const records = await loadImported();
     const existing = records.find((record) => record.id === id);
@@ -1071,7 +1186,7 @@ export function wardrobeImportApi(options = {}) {
         const fullPhoto = current.internal.cropFile ? await readFile(path.join(dir, current.internal.originalFile)) : null;
         let bytes;
         if (stageName === "garment") {
-          chromaKeyUsed = chooseChromaKey(current.metadata.color);
+          chromaKeyUsed = chooseChromaKey(current.metadata.color, current.metadata.secondaryColor);
           const transparent = (await ai.status()).provider === "codex";
           const basePrompt = options.garmentPrompt || buildGarmentPrompt(current.metadata, chromaKeyUsed, { transparent });
           const images = [{ data: selected, role: "the selected photo cropped to the garment; reproduce this exact garment" }];
@@ -1145,7 +1260,7 @@ export function wardrobeImportApi(options = {}) {
       } finally {
         say(status, null);
       }
-    }).finally(() => running.delete(lock));
+    }).catch(logFailure(`The ${stageName} for job ${job.id}`)).finally(() => running.delete(lock));
     running.set(lock, task);
     return task;
   }
@@ -1153,6 +1268,19 @@ export function wardrobeImportApi(options = {}) {
   async function handler(req, res, next) {
     const url = new URL(req.url, "http://localhost");
     if (!url.pathname.startsWith("/api/import/")) return next();
+    // A web page on another site can send simple cross-origin requests to this server; most of these endpoints spend
+    // AI usage. A foreign Origin is refused, and changes must be JSON, which browsers can't send cross-site without a
+    // CORS preflight this server never approves.
+    // shortcut: anything on the LAN can still call the API directly (no auth); add a paired token if the Mac leaves a trusted network.
+    const origin = req.headers.origin;
+    if (origin) {
+      let host = null;
+      try { host = new URL(origin).host; } catch {}
+      if (host !== req.headers.host) return json(res, 403, { error: "Cross-origin requests are not allowed" });
+    }
+    if (!["GET", "HEAD"].includes(req.method) && (req.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "application/json") {
+      return json(res, 415, { error: "Send changes as application/json" });
+    }
     try {
       if (url.pathname === "/api/import/wardrobe" && req.method === "GET") {
         return json(res, 200, await loadImported());
@@ -1173,7 +1301,7 @@ export function wardrobeImportApi(options = {}) {
         return json(res, 200, await saveModelReference(await body(req)));
       }
       if (url.pathname === "/api/import/model-reference" && req.method === "GET") {
-        return sendImage(res, path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png")), previewWidth(url), "no-store");
+        return sendImage(req, res, path.resolve(root, setting("WARDROBE_MODEL_REFERENCE", "data/model-reference.png")), previewWidth(url), "no-cache");
       }
       const wardrobeDeleteMatch = url.pathname.match(/^\/api\/import\/wardrobe\/(import-[a-f0-9-]{36})$/i);
       if (wardrobeDeleteMatch && req.method === "PATCH") {
@@ -1225,8 +1353,8 @@ export function wardrobeImportApi(options = {}) {
       }
       if (url.pathname === "/api/import/plans" && req.method === "POST") {
         const input = await body(req);
-        if (input.background === true) return json(res, 202, startStyling(input));
-        return json(res, 200, await planOutfits(input));
+        if (input.background === true) return json(res, 202, await startStyling(input));
+        return json(res, 200, await queuedPlan(input));
       }
       if (url.pathname === "/api/import/plans/styling" && req.method === "GET") {
         return json(res, 200, [...styling.values()]);
@@ -1242,11 +1370,13 @@ export function wardrobeImportApi(options = {}) {
       }
       if (url.pathname === "/api/import/wait" && req.method === "GET") {
         const since = Number(url.searchParams.get("since"));
-        return json(res, 200, await waitForWork(Number.isFinite(since) ? since : Date.now()));
+        let gone = false;
+        res.on("close", () => { gone = true; });
+        return json(res, 200, await waitForWork(Number.isFinite(since) ? since : Date.now(), () => gone));
       }
       const outfitAssetMatch = url.pathname.match(/^\/api\/import\/outfits\/([\w.-]+\.png)$/);
       if (outfitAssetMatch && req.method === "GET") {
-        return sendImage(res, path.join(outfitDir, path.basename(outfitAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
+        return sendImage(req, res, path.join(outfitDir, path.basename(outfitAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
       }
       const planMatch = url.pathname.match(/^\/api\/import\/plans\/(\d{4}-\d{2}-\d{2})$/);
       if (planMatch && req.method === "DELETE") {
@@ -1261,11 +1391,11 @@ export function wardrobeImportApi(options = {}) {
       }
       const libraryAssetMatch = url.pathname.match(/^\/api\/import\/library\/([\w.-]+)$/i);
       if (libraryAssetMatch && req.method === "GET") {
-        return sendImage(res, path.join(libraryAssetDir, path.basename(libraryAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
+        return sendImage(req, res, path.join(libraryAssetDir, path.basename(libraryAssetMatch[1])), previewWidth(url), "public, max-age=31536000, immutable");
       }
       const assetMatch = url.pathname.match(/^\/api\/import\/assets\/([a-f0-9-]{36})\/([\w.-]+)$/i);
       if (assetMatch && req.method === "GET") {
-        return sendImage(res, path.join(jobsDir, assetMatch[1], path.basename(assetMatch[2])), previewWidth(url), "no-store");
+        return sendImage(req, res, path.join(jobsDir, assetMatch[1], path.basename(assetMatch[2])), previewWidth(url), "no-cache");
       }
       if (url.pathname === API_ROOT && req.method === "POST") {
         const setup = await setupStatus();
@@ -1277,7 +1407,7 @@ export function wardrobeImportApi(options = {}) {
         const clientId = typeof input.clientId === "string" && /^[\w-]{1,64}$/.test(input.clientId) ? input.clientId : null;
         if (input.background === true) return json(res, 202, await startDetection(photo, clientId));
         // The web app still waits for the result in the request.
-        const jobs = await createJobs(photo, await detectClothes(ai, photo, () => {}, reviewed));
+        const jobs = await detectQueue(async () => createJobs(photo, await detectClothes(ai, photo, () => {}, reviewed)));
         return json(res, 202, { jobs: jobs.map(publicJob), noClothingDetected: jobs.length === 0 });
       }
       if (url.pathname === "/api/import/detections" && req.method === "GET") {
@@ -1329,7 +1459,7 @@ export function wardrobeImportApi(options = {}) {
           const tolerance = cleanupTolerance(input.tolerance);
           const sourceName = path.basename(new URL(stage.failedAssetUrl, "http://localhost").pathname);
           const source = await readFile(path.join(jobsDir, job.id, sourceName));
-          const key = stage.chromaKey || chooseChromaKey(job.metadata?.color);
+          const key = stage.chromaKey || chooseChromaKey(job.metadata?.color, job.metadata?.secondaryColor);
           const cleaned = await processChromaBackground(source, key, { tolerance });
           const previewName = `garment-${stage.attempts}-cleanup-${tolerance}.png`;
           const previewUrl = `${ASSET_ROOT}/${job.id}/${previewName}`;
@@ -1413,24 +1543,49 @@ export function wardrobeImportApi(options = {}) {
       settingsFile = path.join(dataDir, "settings.json");
       detectionsDir = path.join(dataDir, "detections");
       await mkdir(detectionsDir, { recursive: true });
+      stylingDir = path.join(dataDir, "styling");
+      await mkdir(stylingDir, { recursive: true });
+      // Temp files of saves cut off by a crash; old ones only, since another copy of this plugin may be mid-save.
+      for (const name of await readdir(dataDir).catch(() => [])) {
+        const file = path.join(dataDir, name);
+        if (!/\.json\.[\w-]+\.tmp$/.test(name)) continue;
+        const info = await stat(file).catch(() => null);
+        if (info && Date.now() - info.mtimeMs > 60 * 1000) await rm(file, { force: true });
+      }
       outfitDir = path.join(dataDir, "outfit-images");
       // Back cutouts cannot survive a restart either.
       const library = await loadImported().catch(() => []);
       // Cutouts and try-ons that were running when the server stopped are resumed once everything below is set up.
       const interruptedCutouts = library.flatMap((record) => ["back", "front"].filter((side) => record[side]?.status === "processing").map((side) => [record, side]));
-      const interruptedTryOns = Object.values(await loadPlans()).filter((plan) => plan.tryOn?.status === "processing");
+      // A damaged plans.json must not stop the server from starting; plan requests keep reporting it until it is fixed.
+      const interruptedTryOns = Object.values(await loadPlans().catch((error) => { console.warn(`Couldn't read plans: ${error.message}`); return {}; }))
+        .filter((plan) => plan.tryOn?.status === "processing");
       libraryAssetDir = path.join(dataDir, "imported");
       await mkdir(jobsDir, { recursive: true });
       await mkdir(libraryAssetDir, { recursive: true });
       for (const [record, side] of interruptedCutouts) {
         if (running.has(`${side}:${record.id}`)) continue;
-        const pending = record[side].pending ? await readFile(libraryFile(record[side].pending)).catch(() => null) : null;
-        startCutout(record.id, side, { photo: pending, direction: record[side].direction || "" }).catch((error) => updateRecord(record.id, (fresh) => {
-          fresh[side] = { status: "failed", error: `Interrupted: ${error.message}`, updatedAt: new Date().toISOString() };
-        }));
+        const oldPending = record[side].pending;
+        const pending = oldPending ? await readFile(libraryFile(oldPending)).catch(() => null) : null;
+        startCutout(record.id, side, { photo: pending, direction: record[side].direction || "" })
+          // The resumed cutout saved the photo again as JPEG; an older PNG copy is no longer referenced.
+          .then(() => oldPending?.endsWith(".png") && rm(libraryFile(oldPending), { force: true }))
+          .catch((error) => updateRecord(record.id, (fresh) => {
+            fresh[side] = { status: "failed", error: `Interrupted: ${error.message}`, updatedAt: new Date().toISOString() };
+          }))
+          .catch(logFailure(`Resuming the ${side} cutout of ${record.id}`));
       }
       for (const plan of interruptedTryOns) {
-        startTryOn(plan.date).catch((error) => saveTryOn(plan.date, plan.garmentIds.join("+"), { status: "failed", error: error.message }));
+        startTryOn(plan.date).catch((error) => saveTryOn(plan.date, plan.garmentIds.join("+"), { status: "failed", error: error.message }))
+          .catch(logFailure(`Resuming the try-on for ${plan.date}`));
+      }
+      // Days that were being styled when the server stopped.
+      for (const name of await readdir(stylingDir).catch(() => [])) {
+        const file = path.join(stylingDir, name);
+        const input = await readFile(file, "utf8").then(JSON.parse).catch(() => null);
+        const dates = Array.isArray(input?.days) ? input.days.map((day) => day?.date) : [];
+        if (dates.some((date) => styling.get(date)?.status === "working")) continue;
+        await startStyling(input || {}, file).catch((error) => { console.warn(`Couldn't resume styling ${name}: ${error.message}`); return rm(file, { force: true }); });
       }
       // Photos that were still being searched when the server stopped.
       for (const name of await readdir(detectionsDir).catch(() => [])) {
@@ -1457,6 +1612,11 @@ export function wardrobeImportApi(options = {}) {
         if (job.stages.crop?.status === "rejected" || job.stages.garment.status === "rejected" || job.stages.modeled.status === "rejected") {
           await rm(path.join(jobsDir, job.id), { recursive: true, force: true });
           continue;
+        }
+        // Modeled photos aren't resumed (imports finish at the cutout); one cut off mid-way would otherwise spin forever.
+        if (["processing", "queued"].includes(job.stages.modeled.status) && !running.has(`${job.id}:modeled`)) {
+          Object.assign(job.stages.modeled, { status: "failed", error: "Interrupted by a server restart. Try again.", updatedAt: new Date().toISOString() });
+          await saveJob(job);
         }
         if (job.stages.crop && job.stages.crop.status !== "approved") continue;
         if (["processing", "queued"].includes(job.stages.garment.status) && !running.has(`${job.id}:garment`)) {

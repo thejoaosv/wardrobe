@@ -1,35 +1,30 @@
 # Outfit image prompt
 
-Use this template with the identity reference first, then the exact wardrobe cutouts in the listed order. Delete optional clauses that do not apply.
+This mirrors the app's own try-on prompt (`buildTryOnPrompt` in `scripts/import-job-api.mjs`): an edit of the user's photo, not a new photograph. Attach the user's photo first, then the optional head close-up, then the garment cutouts (or one numbered sheet) in the listed order. Delete optional clauses that do not apply, and renumber the images when the close-up is left out.
 
 ```text
-Use case: identity-preserve
-Asset type: square outfit gallery photograph
+Use case: identity-preserving clothing edit
+Asset type: vertical outfit try-on photograph
 
-Image 1: identity reference for the exact person to preserve.
-Image 2: exact top garment reference.
-Image 3: exact bottom garment reference.
-[Image 4: exact outer-layer reference. Preserve its real construction and closure exactly; never invent a zipper, buttons, placket, or opening.]
-[Image 5: exact shoe or accessory reference.]
+Image 1: a photo of the user. This is the photo to edit.
+[Image 2: a close-up of the same person's head from Image 1, the authority for their face, hair and glasses.]
+The remaining images are product cutouts of the exact garments to put on them:
+Image 3: exact base top ([NAME]).[ Its text reads: [TEXT].]
+Image 4: exact bottom ([NAME]).
+[Image 5: exact mid layer or outer layer ([NAME]).]
+[Or, past five images in total: Image 3: a reference sheet with every garment, each numbered in its corner: 1. exact base top ([NAME]). 2. ...]
 
-Primary request: Create a professional square editorial fashion photograph of the person from Image 1 wearing all of the exact referenced garments, and only those garments.
+Edit Image 1: replace everything the person wears, including any shoes, watch, wristband and anything they hold, with exactly this outfit and nothing else: [base top: NAME; mid layer: NAME; outer layer: NAME; bottom: NAME; shoes: NAME]. Replace the background with [SIMPLE REAL-WORLD SETTING] that suits a [STYLE] outfit, simple and softly out of focus.
 
-Outfit: [OUTFIT NAME]
-Scene/backdrop: [RESTRAINED REAL-WORLD SETTING].
+Keep the person exactly as they are in Image 1: the same face and features, hair color, length and style, glasses, skin, age, height and build, and the same pose, camera angle and full-body framing from head to shoes, facing the camera. This must be unmistakably the same real person, not a lookalike: do not beautify, slim, de-age or restyle their hair. [Plain understated shoes replace theirs because no shoe reference is provided.] Hands hang relaxed and empty.
 
-Subject: Preserve the same person's recognizable face, hair, age, build, skin texture, and body proportions. Dress them in the exact top and bottom references[ plus the exact outer-layer reference][ and the exact selected shoes/accessory]. Plain understated shoes and invisible basics such as socks are allowed only where needed when no shoe reference is provided. Do not add, replace, or invent any other visible clothing or accessory.
+[Layering: base top innermost, then the mid layer, then the outer layer. The base top shows naturally a little at the neckline or below the hem of the layer over it. Only open a layer if its reference has a real full front zipper or buttons; never invent a closure.]
 
-Style/medium: Photorealistic natural editorial fashion campaign with authentic skin and fabric texture and no synthetic AI polish.
+Garment fidelity: each garment matches its cutout exactly: color, material, fit, construction, pattern, graphics, logos, proportions and closures, worn with natural drape and creases on this body. Text reads letter for letter as listed; never swap in a different or more familiar word or symbol.
 
-Composition/framing: Square 1:1 image. Show the complete person and outfit from head through shoes. Keep the person centered and occupying most of the frame with modest breathing room. Use a relaxed, mostly front-facing pose with arms away from the torso so every item remains readable.
+Realism: one real camera photograph with natural light, true-to-life colors, natural skin texture and believable fabric; the lighting on the person matches the new scene.
 
-Lighting/mood: Warm professional natural light, realistic shadows, and restrained editorial color grading.
-
-Garment fidelity: Preserve every referenced garment precisely: color, material, fit, construction, pattern, graphics, logos, text, proportions, distinctive details, and real closure construction. Keep the top and bottom recognizable without changing their natural length, tuck, or construction.
-
-[Layered-look clause: Layer the exact inner top and outer layer naturally so both remain visibly identifiable. First inspect the outer reference. If it has a real full front button or zipper closure, it may be worn naturally open or partly open using only that closure. If it is a pullover or has no full front opening, keep it closed exactly as designed and reveal the inner top only at its real collar or neckline, sleeve or cuff edge, or a natural 2–4 cm untucked hem below the outer layer. Never invent, add, split, unzip, unbutton, or simulate a closure. Keep the outer garment at its true length even when it overlaps the waistband.]
-
-Avoid: Completely hidden selected garments, invented zippers, buttons, openings or plackets, unnatural layering, extra layers, hats, bags, scarves, jewelry, visible unreferenced undershirts, crossed arms, hands blocking clothing, garment redesign, changed logos or text, cropped feet, extra people, text overlays, watermarks, studio cutout appearance, or synthetic AI polish.
+Avoid: a different face or hairstyle, a new pose or back view, any of the original clothes, shoes or accessories from Image 1, hidden or redesigned garments, changed logos or text, extra layers, hats, bags or jewelry, cropped head or feet, extra people, text overlays, watermarks, a studio cutout look, or synthetic AI polish.
 ```
 
-Use a corrective pass rather than repeating the same prompt when an output fails. Attach the failed output and exact references, name the concrete failure, preserve successful parts, and restate the relevant fidelity or layering constraint.
+Use a corrective pass rather than repeating the same prompt when an output fails: append "A reviewer rejected the previous attempt. Fix every one of these:" followed by each concrete failure as a short instruction, as the app does.

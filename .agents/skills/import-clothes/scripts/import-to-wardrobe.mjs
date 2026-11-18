@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import sharp from "sharp";
@@ -63,6 +63,9 @@ function normalizeItem(item) {
     color: item.color.toLowerCase(),
     secondaryColor: item.secondaryColor?.toLowerCase() || null,
     tags,
+    // The planner styles from these; the app reads them the same way it reads its own imports.
+    description: typeof item.description === "string" ? item.description.trim().slice(0, 400) : null,
+    text: typeof item.text === "string" ? item.text.trim().slice(0, 200) : null,
   };
 }
 
@@ -91,7 +94,13 @@ async function readJson(file, fallback) {
 
 async function atomicJson(file, value) {
   const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  const handle = await open(temporary, "w");
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await rename(temporary, file);
 }
 
@@ -134,38 +143,46 @@ for (const item of accepted) {
 const dataDir = path.join(repo, "data");
 const importedDir = path.join(dataDir, "imported");
 const libraryFile = path.join(dataDir, "library.json");
-const records = await readJson(libraryFile, []);
-if (!Array.isArray(records)) throw new Error(`${libraryFile} must contain a JSON array`);
-
-const nextRecords = [...records];
-for (const item of prepared) {
-  const assetUrl = `/api/import/library/${item.assetName}`;
-  const modeledUrl = item.modeledAssetName ? `/api/import/library/${item.modeledAssetName}` : null;
-  const existingIndex = nextRecords.findIndex((entry) => entry.id === item.id);
-  const existing = existingIndex === -1 ? null : nextRecords[existingIndex];
-  const record = {
-    id: item.id,
-    name: item.name,
-    part: item.part,
-    color: item.color,
-    secondaryColor: item.secondaryColor,
-    palette: [item.color, item.secondaryColor].filter(Boolean),
-    tags: item.tags,
-    image: assetUrl,
-    thumbnail: assetUrl,
-    modeledImage: modeledUrl || existing?.modeledImage || null,
-    importJobId: item.uuid,
-  };
-  if (existingIndex === -1) nextRecords.push(record);
-  else nextRecords[existingIndex] = { ...nextRecords[existingIndex], ...record };
+// Merges the accepted items into the current library records.
+function merge(records) {
+  if (!Array.isArray(records)) throw new Error(`${libraryFile} must contain a JSON array`);
+  const nextRecords = [...records];
+  for (const item of prepared) {
+    const assetUrl = `/api/import/library/${item.assetName}`;
+    const modeledUrl = item.modeledAssetName ? `/api/import/library/${item.modeledAssetName}` : null;
+    const existingIndex = nextRecords.findIndex((entry) => entry.id === item.id);
+    const existing = existingIndex === -1 ? null : nextRecords[existingIndex];
+    const record = {
+      id: item.id,
+      name: item.name,
+      part: item.part,
+      color: item.color,
+      secondaryColor: item.secondaryColor,
+      palette: [item.color, item.secondaryColor].filter(Boolean),
+      tags: item.tags,
+      ...(item.description !== null && { description: item.description }),
+      ...(item.text !== null && { text: item.text }),
+      image: assetUrl,
+      thumbnail: assetUrl,
+      modeledImage: modeledUrl || existing?.modeledImage || null,
+      importJobId: item.uuid,
+    };
+    if (existingIndex === -1) nextRecords.push(record);
+    else nextRecords[existingIndex] = { ...nextRecords[existingIndex], ...record };
+  }
+  return nextRecords;
 }
 
+let nextRecords = merge(await readJson(libraryFile, []));
 if (!options.dryRun) {
   await mkdir(importedDir, { recursive: true });
   for (const item of prepared) {
     await copyFile(item.source, path.join(importedDir, item.assetName));
     if (item.modeledSource) await copyFile(item.modeledSource, path.join(importedDir, item.modeledAssetName));
   }
+  // Read again right before writing: the running app may have saved changes while the images were copied.
+  // shortcut: a save landing in the few milliseconds between this read and the write is still lost; stop the app for big imports.
+  nextRecords = merge(await readJson(libraryFile, []));
   await atomicJson(libraryFile, nextRecords);
 }
 

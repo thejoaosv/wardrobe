@@ -1,17 +1,19 @@
 ---
 name: import-clothes
-description: Extract unique garments from outfit or model photos, reconstruct clean transparent clothing cutouts, generate identity-preserving modeled editorial photos, and import approved items directly into this Wardrobe project's local JSON database. Use when a user asks Codex to add, ingest, extract, or import clothes from a folder of photos into Wardrobe, wants modeled photos for imported pieces, or wants finished wardrobe PNGs without using the in-app OpenAI import flow.
+description: Extract unique garments from outfit or model photos, reconstruct clean transparent clothing cutouts, optionally generate modeled editorial photos, and import approved items directly into this Wardrobe project's local JSON database. Use when a user asks Codex to add, ingest, extract, or import clothes from a folder of photos into Wardrobe, wants modeled photos for imported pieces, or wants finished wardrobe PNGs without using the in-app OpenAI import flow.
 ---
 
 # Import Clothes
 
-Turn photos of worn clothing into source-faithful transparent catalog PNGs and modeled editorial photos, then add the approved results to the local Wardrobe database.
+Turn photos of worn clothing into source-faithful transparent catalog PNGs, then add the approved results to the local Wardrobe database.
+
+The app's own import (adding photos in the app) does the same job one photo at a time and finishes at the cutout: outfits are later dressed on the user's own photo by the app's try-on, not from per-piece modeled photos. Per-piece modeled photos (step 7) are optional; the web gallery shows one when a piece has it.
 
 ## Inputs
 
 Obtain the source-image folder unless the user already supplied it. Resolve relative paths from the repository root. Confirm this is the Wardrobe repository by checking for `package.json`, `scripts/import-job-api.mjs`, and `data/` in `.gitignore`.
 
-At the start, check for the identity reference at `data/model-reference.png` or the local path configured by `WARDROBE_MODEL_REFERENCE`. If neither exists, ask: `Please provide a clear PNG reference photo of yourself for the modeled wardrobe images. What is its local path?` Do not begin modeled generation until the user supplies it. Keep the image local and never add it to Git.
+Only when the user wants modeled photos, check for the identity reference at `data/model-reference.png` or the local path configured by `WARDROBE_MODEL_REFERENCE`. If neither exists, ask: `Please provide a clear PNG reference photo of yourself for the modeled wardrobe images. What is its local path?` Do not begin modeled generation until the user supplies it. Keep the image local and never add it to Git.
 
 Default to direct database import when the user asks to add clothes to Wardrobe. If they only request cutouts, ask for a new output-folder name instead and skip the database step.
 
@@ -68,6 +70,8 @@ Write `$WORK/manifest.json` using this final shape:
       "color": "#172033",
       "secondaryColor": "#f2efe6",
       "tags": ["knit", "fair isle", "zip"],
+      "description": "Mid-weight wool fair isle cardigan with a full front zip; warm, casual.",
+      "text": "",
       "status": "accepted",
       "sourceRefs": ["IMG_1284.jpg", "IMG_1289.jpg"],
       "unknowns": []
@@ -78,14 +82,14 @@ Write `$WORK/manifest.json` using this final shape:
 
 Use only these `part` values:
 
-- `upperbody` — base tops: t-shirts, shirts, polos
-- `midlayer` — hoodies, sweatshirts, sweaters, cardigans, fleeces
-- `wholebody_up` — jackets and outerwear
+- `upperbody` — base tops worn against the skin: t-shirts, shirts, polos, tank tops
+- `midlayer` — warm layers over a base top: hoodies, sweatshirts, sweaters, cardigans, fleeces
+- `wholebody_up` — outerwear: jackets, coats, rain jackets, puffers, blazers
 - `lowerbody` — bottoms
 - `accessories_up` — accessories
 - `shoes` — shoes
 
-Use lowercase hyphenated slugs, six-digit hex colors, at most 12 short lowercase tags, and `null` when there is no genuinely distinct secondary color. Keep working records as `status: "generate"` or `status: "hold"`; change a record to `accepted` only after final QA. The import script ignores every non-accepted record.
+Use lowercase hyphenated slugs, six-digit hex colors, at most 12 short lowercase tags, and `null` when there is no genuinely distinct secondary color. `description` (one or two sentences on fabric, weight, fit, warmth and formality, at most 400 characters) and `text` (every word printed on the outside, letter for letter, with placement, e.g. `chest: small "DICKIES"`, or empty) are what the app's stylist plans with; include both. Leave out `modeledFile` when no modeled photo is made. Keep working records as `status: "generate"` or `status: "hold"`; change a record to `accepted` only after final QA. The import script ignores every non-accepted record.
 
 ### 3. Prepare focused references
 
@@ -95,7 +99,7 @@ For each generated item, crop the strongest view with about 12% padding and pres
 
 Use Imagegen with the primary crop and only a genuinely complementary second crop. Ask for the complete empty item centered on a perfectly uniform chroma background with generous padding and no shadow. State the exact source-supported construction and all uncertain details that must be omitted.
 
-Default to `#00ff00`; use `#ff00ff` for green garments unless magenta is prominent. Otherwise choose a maximally distant saturated RGB key. Never use a key color present in the garment.
+Choose the key among `#00ff00`, `#ff00ff` and `#00ffff` that is farthest from both the primary and the secondary color, as the app does: green for white, grey or black garments without green details, magenta for green ones. Never use a key color present anywhere in the garment, logos included.
 
 Save generated chroma images to `$WORK/chroma/SLUG.png`. Compare every result against its source before accepting it.
 
@@ -130,9 +134,9 @@ For every final PNG, verify:
 
 Inspect checkerboard contact sheets of at most 12 items and compare sensitive results individually with their source crops. Regenerate critical or major failures. Mark only passing records `accepted`.
 
-### 7. Generate modeled photos
+### 7. Generate modeled photos (optional)
 
-Use `data/model-reference.png` as the identity reference unless `WARDROBE_MODEL_REFERENCE` points to another local PNG. If neither exists, ask the user for a clear reference photo before continuing. Never add that photo to Git.
+Skip this step unless the user asked for modeled photos. Use `data/model-reference.png` as the identity reference unless `WARDROBE_MODEL_REFERENCE` points to another local PNG. If neither exists, ask the user for a clear reference photo before continuing. Never add that photo to Git.
 
 For every accepted cutout, use Imagegen with the identity image first and exact garment PNG second. Save a horizontal 3:2 PNG as `$WORK/modeled/SLUG.png` and set `modeledFile` to `SLUG.png` in the manifest.
 
@@ -165,9 +169,9 @@ node .agents/skills/import-clothes/scripts/import-to-wardrobe.mjs \
   --manifest "$WORK/manifest.json"
 ```
 
-The script validates the cutouts and modeled PNGs, copies them into `data/imported/`, and atomically updates `data/library.json`. It derives stable UUIDs from cutout content, so rerunning an identical import updates metadata and modeled photos without creating duplicates.
+Leave out `--modeled` when step 7 was skipped. The script validates the cutouts and modeled PNGs, copies them into `data/imported/`, and atomically updates `data/library.json`, reading it again right before the write so changes the running app saved meanwhile are kept. It derives stable UUIDs from cutout content, so rerunning an identical import updates metadata and modeled photos without creating duplicates; a regenerated cutout is a new piece, so delete the old one in the app.
 
-Restart the dev server only if the running app does not pick up the database change, then verify the new item count at `/api/import/wardrobe` and visually inspect the gallery.
+The app reads `data/library.json` on every request, so no restart is needed. Verify the new item count at `/api/import/wardrobe` and visually inspect the gallery.
 
 For cutout-only delivery, create the requested new child folder under the repository root and copy only accepted PNGs into it. Do not write the database.
 
