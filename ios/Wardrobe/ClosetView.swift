@@ -116,7 +116,6 @@ private struct ClosetCell: View {
     var body: some View {
         Button(action: open) {
             GarmentImage(item: item)
-                .garmentLift()
                 .padding(8)
                 .aspectRatio(1, contentMode: .fit)
                 .saturation(item.isAvailable ? 1 : 0)
@@ -139,12 +138,15 @@ private struct ClosetCell: View {
         .accessibilityLabel(item.name)
         .accessibilityValue(item.isAvailable ? "Available" : "In the wash")
         .accessibilityHint("Opens details")
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24, style: .continuous))
         .contextMenu {
             Button(item.isAvailable ? "In the wash" : "Back from the wash", systemImage: "washer") {
                 Task { await store.setUnavailable([item.id], item.isAvailable) }
             }
             Button("Remove piece", systemImage: "trash", role: .destructive) { Task { await store.delete(item) } }
         }
+        // After the menu, so the long-press preview isn't a clipped glow.
+        .garmentLift()
     }
 }
 

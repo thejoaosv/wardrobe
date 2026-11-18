@@ -6,6 +6,9 @@ enum Theme {
     static let ink = Color(light: 0x161513, dark: 0xF4F1EB)
     static let muted = Color(light: 0x8A847A, dark: 0x8F8980)
     static let spring = Animation.spring(duration: 0.55, bounce: 0.22)
+    static let lift = Color(uiColor: UIColor { @Sendable traits in
+        traits.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.07) : UIColor(white: 0, alpha: 0.12)
+    })
 }
 
 // SwiftUI resolves dynamic colors on its render thread during animations, so this must not be main-actor isolated.

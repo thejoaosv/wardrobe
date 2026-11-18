@@ -147,8 +147,34 @@ struct MenuChipLabel: View {
 }
 
 extension View {
-    /// Lifts a cutout off the canvas: a soft shadow in light mode and a soft glow in dark mode, so black pieces stay visible.
+    /// Lifts a cutout off the canvas: a soft shadow in light mode and a faint glow in dark mode, just enough to keep
+    /// black pieces visible without pulling the eye away from the clothes.
     func garmentLift() -> some View {
-        shadow(color: Theme.ink.opacity(0.16), radius: 16, y: 6)
+        shadow(color: Theme.lift, radius: 10, y: 4)
+    }
+}
+
+/// An on/off switch drawn in the app's style; a plain button underneath, so it behaves like every other control here.
+struct SwitchButton: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(Theme.spring) { isOn.toggle() }
+        } label: {
+            Capsule()
+                .fill(isOn ? Theme.ink : Theme.ink.opacity(0.12))
+                .frame(width: 50, height: 30)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle().fill(isOn ? Theme.canvas : Theme.card).padding(3).shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.selection, trigger: isOn)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isToggle)
     }
 }
