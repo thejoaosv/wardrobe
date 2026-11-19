@@ -22,8 +22,14 @@ export const OptimizedImage = forwardRef(function OptimizedImage({
 }, ref) {
   const normalizedSource = sourcePath(src);
 
-  if (!normalizedSource || normalizedSource.startsWith("data:") || normalizedSource.startsWith("blob:") || normalizedSource.startsWith("/api/")) {
+  if (!normalizedSource || normalizedSource.startsWith("data:") || normalizedSource.startsWith("blob:")) {
     return <img ref={ref} src={src} alt={alt} sizes={sizes} loading={loading || (priority ? "eager" : "lazy")} decoding={decoding || "async"} {...props} />;
+  }
+
+  // The wardrobe's own images: the server resizes them to a WebP preview with ?w=, instead of sending the full PNG.
+  if (normalizedSource.startsWith("/api/")) {
+    const sized = (width) => `${src}${src.includes("?") ? "&" : "?"}w=${width}`;
+    return <img ref={ref} src={sized(breakpoints[breakpoints.length - 1])} srcSet={breakpoints.map((width) => `${sized(width)} ${width}w`).join(", ")} alt={alt} sizes={sizes} loading={loading || (priority ? "eager" : "lazy")} decoding={decoding || "async"} {...props} />;
   }
 
   return (

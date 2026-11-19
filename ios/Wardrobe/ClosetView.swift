@@ -115,7 +115,8 @@ private struct ClosetCell: View {
 
     var body: some View {
         Button(action: open) {
-            GarmentImage(item: item)
+            // A third of the screen wide: 400px is plenty, and a quarter of the decoded size of the default.
+            GarmentImage(item: item, width: 400)
                 .padding(12)
                 .aspectRatio(1, contentMode: .fit)
                 // A soft pool of light behind each piece with no edge: black clothes stand out on the dark canvas,

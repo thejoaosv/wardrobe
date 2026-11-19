@@ -44,13 +44,6 @@ struct OutfitsView: View {
         }
         .onAppear { selected = selected ?? days.first }
         .sensoryFeedback(.selection, trigger: selected)
-        .task(id: store.plans.contains { $0.tryOn?.status == "processing" }) {
-            // Try-ons take about a minute on the Mac; refresh until they land.
-            while store.plans.contains(where: { $0.tryOn?.status == "processing" }) && !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                await store.loadPlans()
-            }
-        }
     }
 }
 
@@ -416,7 +409,7 @@ private struct TryOnPanel: View {
             switch plan.tryOn?.status {
             case "ready":
                 Button { showing = true } label: {
-                    AsyncImage(url: store.url(plan.tryOn?.image, width: 1200), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                    RetryingAsyncImage(url: store.url(plan.tryOn?.image, width: 1200), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                         if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -505,7 +498,7 @@ private struct TryOnViewer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            AsyncImage(url: store.url(plan.tryOn?.image, width: 1600)) { phase in
+            RetryingAsyncImage(url: store.url(plan.tryOn?.image, width: 1600)) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFit() } else { Color.clear }
             }
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))

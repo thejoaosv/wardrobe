@@ -2,6 +2,19 @@
 
 The server reports its version and this changelog at `/api/import/version`. Valet shows it in Settings, behind a few taps on the server version.
 
+## 1.8.0 — 2026-11-18
+- Cutouts keep dark and colourful garments and logos intact; only the background is removed
+- Rate limits and server errors wait and try again instead of using up the attempts; refused requests stop at once
+- A result the AI reviewer couldn't check says so instead of passing silently
+- A failed background task or a damaged file no longer stops the server
+- Styling runs one day at a time, shows its place in line and survives a restart
+- Restyling a day while its old try-on runs starts a new try-on for the new outfit
+- Weekly plans stop retrying rules the wardrobe can't meet
+- Codex's generated images are cleaned up after each use
+- Photos sent to the AI are smaller JPEGs, and images load faster with caching that revalidates
+- Changes must come from the app or the same page as JSON, so other websites can't start AI work
+- Valet build 12 is needed: earlier builds send some changes in a way this server refuses
+
 ## 1.7.0 — 2026-11-18
 - Try-ons edit your own photo, keeping your face, hair, glasses and pose, and change only the clothes and the scene
 - A close-up of your face, cropped from your photo once, guides the try-on and its check

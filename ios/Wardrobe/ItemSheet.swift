@@ -5,6 +5,7 @@ import SwiftUI
 struct ItemSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var draft: Item
     @State private var newTag = ""
     @State private var frontPick: PhotosPickerItem?
@@ -17,6 +18,7 @@ struct ItemSheet: View {
     /// The side whose photo is on its way to the Mac, before the server reports it as processing.
     @State private var sending: Side?
     @State private var scroll = ScrollPosition(edge: .top)
+    @State private var opened = false
     private let original: Item
 
     enum Side: String, Identifiable { case front, back; var id: String { rawValue } }
@@ -171,8 +173,10 @@ struct ItemSheet: View {
         .photosPicker(isPresented: Binding(get: { picking == .back }, set: { if !$0 { picking = nil } }), selection: $backPick, matching: .images)
         .fullScreenCover(item: $shooting) { side in
             CameraPicker { photo in
-                guard let jpeg = uploadJPEG(photo) else { return }
-                Task { await use(jpeg, for: side) }
+                Task {
+                    guard let jpeg = await uploadJPEG(photo) else { return }
+                    await use(jpeg, for: side)
+                }
             }
             .ignoresSafeArea()
         }
@@ -185,13 +189,15 @@ struct ItemSheet: View {
         }
         .onChange(of: frontPick) { _, pick in load(pick, for: .front) }
         .onChange(of: backPick) { _, pick in load(pick, for: .back) }
-        .task(id: "\(backStatus ?? "")\(frontStatus ?? "")") {
-            // Cutouts take about a minute on the Mac.
-            while (backStatus == "processing" || frontStatus == "processing") && !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                await store.loadItems()
-            }
+        // An edit the Mac didn't get yet picks up where it was left.
+        .onAppear {
+            // Only on opening: the camera closing shows the sheet again, and would undo what was typed since.
+            guard !opened else { return }
+            opened = true
+            if let pending = store.pendingEdits[original.id] { draft = pending }
         }
+        // Leaving the app may be the last chance to save before iOS closes it.
+        .onChange(of: scenePhase) { _, phase in if phase == .background { Task { await save() } } }
     }
 
     /// Errors and the reviewer's leftover notes for the cutouts.
@@ -234,7 +240,7 @@ struct ItemSheet: View {
                     if isBusy(.back) {
                         working(live.backImage == nil ? "Cutting out the back…" : "Redoing the back…")
                     } else {
-                        AsyncImage(url: store.url(live.backImage, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+                        RetryingAsyncImage(url: store.url(live.backImage, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                             if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) } else { Color.clear }
                         }
                         .garmentLift()
@@ -293,7 +299,7 @@ struct ItemSheet: View {
         guard let pick else { return }
         if side == .front { frontPick = nil } else { backPick = nil }
         Task {
-            guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
+            guard let data = try? await pick.loadTransferable(type: Data.self), let jpeg = await uploadJPEG(data) else { return }
             await use(jpeg, for: side)
         }
     }

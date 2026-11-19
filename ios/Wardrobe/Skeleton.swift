@@ -196,9 +196,12 @@ struct BodySkeleton: View {
             withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) { sweep = true }
         }
         .task(id: store.referenceStamp) {
+            let stamp = store.referenceStamp
+            if let cached = store.silhouette, cached.stamp == stamp { return silhouette = cached.image }
             guard let url = store.url("/api/import/model-reference", width: 900),
                   let (data, _) = try? await URLSession.shared.data(from: url) else { return }
             silhouette = await Task.detached(priority: .userInitiated) { Self.person(in: data) }.value
+            if let silhouette { store.silhouette = (stamp, silhouette) }
         }
         .accessibilityHidden(true)
     }
@@ -215,8 +218,11 @@ struct BodySkeleton: View {
         guard let body = bounds(of: buffer) else { return nil }
         // Softened a touch so the edge reads as a skeleton, not a cutout; cropped to the body so it fills the space.
         let mask = full.clampedToExtent().applyingGaussianBlur(sigma: 2).cropped(to: body)
-        return CIContext().createCGImage(mask, from: body)
+        return context.createCGImage(mask, from: body)
     }
+
+    /// Made once: a context is costly to set up and safe to share.
+    nonisolated private static let context = CIContext()
 
     /// The person's box in Core Image coordinates (origin bottom left), with a little room around it.
     nonisolated private static func bounds(of buffer: CVPixelBuffer) -> CGRect? {

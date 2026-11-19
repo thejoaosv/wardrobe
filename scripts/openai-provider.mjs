@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import { promisify } from "node:util";
 
 const SNAPSHOT = /-\d{4}-\d{2}-\d{2}$/;
@@ -36,9 +37,25 @@ export function pickModels(ids) {
     image: newest(stable.filter((id) => /^gpt-image-\d/.test(id)), "gpt-image-", (id) => (/mini|flare|fast/.test(id) ? 1 : 0)),
     vision: tier(TASK_TIERS.vision) || legacyMini,
     planner: tier(TASK_TIERS.planner) || legacyMini,
-    imageAgent: tier(TASK_TIERS.imageAgent),
+    imageAgent: tier(TASK_TIERS.imageAgent) || legacyMini,
   };
 }
+
+// Network failures and timeouts are worth another try later; HTTP errors carry their status and retry-after for the caller to judge.
+async function request(url, init, timeout) {
+  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeout) }).catch((error) => {
+    throw Object.assign(new Error(error.name === "TimeoutError" ? "The AI request timed out" : `Couldn't reach the AI service: ${error.message}`), { transient: true });
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(result.error?.message || `OpenAI request failed (${response.status})`), { status: response.status, retryAfter: Number(response.headers.get("retry-after")) || undefined });
+  }
+  return result;
+}
+
+// Vision only reads the picture, so photos travel as JPEG, a fraction of the PNG's size. Edits keep PNG for alpha.
+const visionJpeg = (image) => sharp(image).flatten({ background: "#e8e8e8" }).jpeg({ quality: 85 }).toBuffer();
+const isJpeg = (bytes) => bytes[0] === 0xff && bytes[1] === 0xd8;
 
 export function createAIProvider(setting) {
   const baseUrl = () => setting("OPENAI_API_BASE_URL", "https://api.openai.com/v1").replace(/\/$/, "");
@@ -46,13 +63,18 @@ export function createAIProvider(setting) {
   let codexReady;
   let apiModels;
   let codexModels;
+  const codexHome = () => setting("CODEX_HOME", path.join(homedir(), ".codex"));
+  // Where Codex's image tool keeps its own copy of each image a thread generates.
+  const generatedFolder = (threadId) => path.join(codexHome(), "generated_images", threadId);
 
   async function hasCodex() {
     if (codexReady !== undefined) return codexReady;
     try {
       const { stdout, stderr } = await promisify(execFile)(setting("CODEX_BIN", "codex"), ["login", "status"], { timeout: 15000 });
       codexReady = /chatgpt/i.test(`${stdout}${stderr}`);
-    } catch {
+    } catch (error) {
+      // A slow check that timed out says nothing, so it is asked again next time; a clear "not signed in" is kept.
+      if (error.killed) return false;
       codexReady = false;
     }
     return codexReady;
@@ -69,21 +91,20 @@ export function createAIProvider(setting) {
   async function model(kind) {
     const pinned = { image: "OPENAI_IMAGE_MODEL", vision: "OPENAI_VISION_MODEL", planner: "OPENAI_PLANNER_MODEL" }[kind];
     if (setting(pinned)) return setting(pinned);
-    apiModels ||= fetch(`${baseUrl()}/models`, { headers: { Authorization: `Bearer ${apiKey()}` } })
-      .then((response) => (response.ok ? response.json() : { data: [] }))
-      .then((result) => pickModels((result.data || []).map((item) => item.id)))
-      .catch(() => ({}));
+    apiModels ||= request(`${baseUrl()}/models`, { headers: { Authorization: `Bearer ${apiKey()}` } }, 30 * 1000)
+      .then((result) => pickModels((result.data || []).map((item) => item.id)));
     const fallback = { image: "gpt-image-2", vision: "gpt-5.4-mini", planner: "gpt-5.4-mini" }[kind];
-    return (await apiModels)[kind] || fallback;
+    // Only a successful listing is kept; a failed one is asked again next time.
+    return (await apiModels.catch(() => { apiModels = undefined; return {}; }))[kind] || fallback;
   }
 
   // Codex lists the models the signed-in plan can use; undefined falls back to the CLI default.
   async function codexModel(kind) {
     if (setting("CODEX_MODEL")) return setting("CODEX_MODEL");
-    codexModels ||= readFile(path.join(setting("CODEX_HOME", path.join(homedir(), ".codex")), "models_cache.json"), "utf8")
-      .then((text) => { const cache = JSON.parse(text); return pickModels((cache.models || cache).map((item) => item.slug || item.id).filter(Boolean)); })
-      .catch(() => ({}));
-    return (await codexModels)[kind] || undefined;
+    codexModels ||= readFile(path.join(codexHome(), "models_cache.json"), "utf8")
+      .then((text) => { const cache = JSON.parse(text); return pickModels((cache.models || cache).map((item) => item.slug || item.id).filter(Boolean)); });
+    // A missing cache is read again next time, so one early miss doesn't leave every task on the CLI default model.
+    return (await codexModels.catch(() => { codexModels = undefined; return {}; }))[kind] || undefined;
   }
 
   // Runs one non-interactive Codex turn on the user's ChatGPT plan inside a throwaway directory.
@@ -92,7 +113,7 @@ export function createAIProvider(setting) {
     try {
       const imageArgs = [];
       for (const [index, image] of images.entries()) {
-        const file = path.join(dir, `image-${index + 1}.png`);
+        const file = path.join(dir, `image-${index + 1}.${isJpeg(image) ? "jpg" : "png"}`);
         await writeFile(file, image);
         imageArgs.push(`--image=${file}`);
       }
@@ -115,13 +136,21 @@ export function createAIProvider(setting) {
           events += chunk;
           threadId = events.match(/"thread_id"\s*:\s*"([\w-]+)"/)?.[1] || null;
         });
-        const timer = setTimeout(() => child.kill("SIGTERM"), timeout);
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+        }, timeout);
         child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-4000); });
         child.on("error", reject);
         child.on("close", (code) => {
           children.delete(child);
           clearTimeout(timer);
-          code === 0 ? resolve() : reject(new Error(`Codex failed (${code}): ${stderr.trim().split("\n").at(-1) || "no output"}`));
+          // A failed or timed-out turn (busy service, usage limit) is retried after a pause rather than fed to the model.
+          if (timedOut) reject(Object.assign(new Error(`Codex timed out after ${Math.round(timeout / 60000)} minutes`), { transient: true }));
+          else if (code === 0) resolve();
+          else reject(Object.assign(new Error(`Codex failed (${code}): ${stderr.trim().split("\n").at(-1) || "no output"}`), { transient: true }));
         });
         child.stdin.end(prompt);
       });
@@ -135,7 +164,7 @@ export function createAIProvider(setting) {
   // Fallback when the agent fails to copy its result: the image tool saves under $CODEX_HOME/generated_images/<thread>.
   async function newestGeneratedImage(threadId) {
     if (!threadId) return null;
-    const folder = path.join(setting("CODEX_HOME", path.join(homedir(), ".codex")), "generated_images", threadId);
+    const folder = generatedFolder(threadId);
     const files = (await readdir(folder).catch(() => [])).filter((name) => name.endsWith(".png"));
     if (!files.length) return null;
     const dated = await Promise.all(files.map(async (name) => ({ name, time: (await stat(path.join(folder, name))).mtimeMs })));
@@ -151,20 +180,18 @@ export function createAIProvider(setting) {
   }
 
   async function apiJSON({ prompt, images = [], schema, kind }) {
-    const response = await fetch(`${baseUrl()}/responses`, {
+    const result = await request(`${baseUrl()}/responses`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: await model(kind),
         input: [{ role: "user", content: [
           { type: "input_text", text: prompt },
-          ...images.map((image) => ({ type: "input_image", image_url: `data:image/png;base64,${image.toString("base64")}` })),
+          ...images.map((image) => ({ type: "input_image", image_url: `data:image/${isJpeg(image) ? "jpeg" : "png"};base64,${image.toString("base64")}` })),
         ] }],
         text: { format: { type: "json_schema", name: "result", strict: true, schema } },
       }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error?.message || `OpenAI request failed (${response.status})`);
+    }, 5 * 60 * 1000);
     const outputText = result.output_text || result.output?.flatMap((item) => item.content || []).find((item) => item.type === "output_text")?.text;
     if (!outputText) throw new Error("OpenAI returned no structured result");
     return JSON.parse(outputText);
@@ -178,9 +205,10 @@ export function createAIProvider(setting) {
 
     // Structured JSON from text plus optional PNG images. kind picks the API model ("vision" or "planner").
     // effort overrides Codex's reasoning effort for work worth more thought, like styling.
-    async json({ prompt, images, schema, kind = "planner", effort }) {
+    async json({ prompt, images: pngs = [], schema, kind = "planner", effort }) {
       const active = await provider();
       if (!active) throw new Error("No AI provider: sign in with `codex login` or set OPENAI_API_KEY");
+      const images = await Promise.all(pngs.map(visionJpeg));
       return active === "codex" ? codexJSON({ prompt, images, schema, effort, model: await codexModel(kind) }) : apiJSON({ prompt, images, schema, kind });
     },
 
@@ -218,6 +246,8 @@ Then copy the generated PNG to ./output.png in the current directory. Do nothing
           throw new Error(`Codex did not produce an image${last.trim() ? `: ${last.trim().slice(0, 300)}` : ""}`);
         } finally {
           await rm(dir, { recursive: true, force: true });
+          // Only this thread's folder: the result is read, and its copy would otherwise stay in ~/.codex for good.
+          if (threadId) await rm(generatedFolder(threadId), { recursive: true, force: true });
         }
       }
       const form = new FormData();
@@ -228,9 +258,8 @@ Then copy the generated PNG to ./output.png in the current directory. Do nothing
       form.set("output_format", "png");
       if (background) form.set("background", background);
       images.forEach((image, index) => form.append("image[]", new Blob([image.data], { type: "image/png" }), `image-${index + 1}.png`));
-      const response = await fetch(`${baseUrl()}/images/edits`, { method: "POST", headers: { Authorization: `Bearer ${apiKey()}` }, body: form });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error?.message || `OpenAI image request failed (${response.status})`);
+      // Image edits with several references can take minutes.
+      const result = await request(`${baseUrl()}/images/edits`, { method: "POST", headers: { Authorization: `Bearer ${apiKey()}` }, body: form }, 10 * 60 * 1000);
       const encoded = result.data?.[0]?.b64_json;
       if (!encoded) throw new Error("OpenAI response did not contain image data");
       return Buffer.from(encoded, "base64");

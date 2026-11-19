@@ -1,11 +1,15 @@
 ---
 name: generate-outfits
-description: Curate complete outfits from the local Wardrobe database and generate identity-preserving square modeled photos for every selected look end to end. Use when a user asks Codex for outfit ideas, combinations, looks, styling suggestions, a lookbook, or modeled outfit images based on clothes already imported into this Wardrobe.
+description: Curate complete outfits from the local Wardrobe database and generate identity-preserving vertical try-on photos for every selected look end to end, as an offline lookbook outside the app. Use when a user asks Codex for outfit ideas, combinations, looks, styling suggestions, a lookbook, or modeled outfit images based on clothes already imported into this Wardrobe.
 ---
 
 # Generate Outfits
 
-Create a complete local outfit collection from `data/library.json`: select strong combinations, generate a square modeled image for each, verify every result, and save the finished manifest and images under `data/`.
+Create a complete local outfit collection from `data/library.json`: select strong combinations, generate a vertical try-on photo for each, verify every result, and save the finished manifest and images under `data/`.
+
+## How this relates to the app
+
+The app plans and dresses outfits itself: the Plan screen saves outfits per day in `data/plans.json`, and its try-on edits the user's own photo (`POST /api/import/plans/DATE/try-on`). This skill makes a separate lookbook. The app does not read `data/outfits.json` and does not list these outfits; only the image files are reachable, at `/api/import/outfits/FILE`. To have the app style a day, use the app instead of this skill.
 
 ## Begin with the count
 
@@ -34,9 +38,9 @@ Assign each worker a disjoint set of outfit IDs plus the exact identity and garm
 
 Read `data/library.json`. Resolve `/api/import/library/FILENAME` assets to `data/imported/FILENAME`. Group items by:
 
-- `upperbody` — base tops: t-shirts, shirts, polos (every outfit needs one)
-- `midlayer` — hoodies, sweaters and fleeces worn over the base top
-- `wholebody_up` — jackets and outer layers
+- `upperbody` — base tops: t-shirts, shirts, polos, tank tops (every outfit needs one)
+- `midlayer` — hoodies, sweatshirts, sweaters, cardigans and fleeces worn over the base top
+- `wholebody_up` — jackets, coats and other outer layers
 - `lowerbody` — bottoms
 - `accessories_up` — optional accessories
 - `shoes` — optional shoes
@@ -47,7 +51,7 @@ If the wardrobe cannot support the requested number of genuinely distinct outfit
 
 ## 2. Curate the combinations
 
-Each outfit must contain exactly one top and one bottom, with an optional jacket, shoes, and restrained accessory. Use these principles recovered from the established Wardrobe outfit workflow:
+Each outfit has exactly one `upperbody` base top and one `lowerbody` bottom, plus an optional `midlayer` over the base top, an optional `wholebody_up` outer layer, optional shoes, and at most one accessory, the same structure the app's planner uses. A midlayer or outer layer never replaces the base top. Pieces marked `"unavailable": true` are in the wash; leave them out. Use these principles:
 
 - Favor tonal or analogous color harmony for cohesion.
 - Use complementary contrast selectively and keep one color or garment dominant.
@@ -72,7 +76,7 @@ Build `$WORK/outfits.json` with the final target count:
       "garmentIds": ["import-...", "import-..."],
       "reason": "Deep navy and camel create controlled warm-cool contrast.",
       "setting": "a quiet warm-stone courtyard with restrained greenery",
-      "image": "outfit-images/navy-camel-classic.png",
+      "image": "outfit-images/navy-camel-classic-1794955186239.png",
       "status": "planned"
     }
   ]
@@ -83,21 +87,21 @@ Use stable lowercase hyphenated IDs. Reject duplicate garment combinations even 
 
 ## 3. Prepare references and prompts
 
-Create one generation package per outfit:
+Create one generation package per outfit, in this order:
 
-1. Identity reference
-2. Exact top cutout
-3. Exact bottom cutout
-4. Optional exact outer layer
-5. Optional exact shoes or accessory only when deliberately selected
+1. The user's photo (identity reference; this is the photo that gets edited)
+2. Optional close-up of the user's head cropped from it, when the face is small in the photo
+3. Each selected garment's front cutout (`image`), base top first, then midlayer, outer layer, bottom, shoes, accessory
 
-Read [references/outfit-image-prompt.md](references/outfit-image-prompt.md) and fill its template from the exact outfit record. Inspect every outer-layer reference before choosing the layered clause; never infer a zipper, buttons, placket, opening, or closure.
+Codex's image tool takes at most five input images. When the package would exceed that, put the garment cutouts on one numbered reference sheet instead of separate images.
 
-Rotate restrained warm, natural settings across the collection while keeping one cohesive editorial art direction.
+Read [references/outfit-image-prompt.md](references/outfit-image-prompt.md) and fill its template from the exact outfit record. Inspect every midlayer and outer-layer reference before choosing the layered clause; never infer a zipper, buttons, placket, opening, or closure.
+
+Rotate simple, softly out-of-focus real-world settings that suit each outfit across the collection.
 
 ## 4. Generate every outfit
 
-Create one square 1:1 modeled PNG per outfit with Imagegen. Save working outputs outside `data/` until they pass review. Use the smallest valid set of references for each call and never omit a selected garment.
+Create one vertical 2:3 (1024x1536) try-on PNG per outfit with Imagegen, editing the user's photo. Save working outputs outside `data/` until they pass review. Use the smallest valid set of references for each call and never omit a selected garment.
 
 Generate in bounded batches when the collection is large. Track every outfit as `planned`, `generated`, `accepted`, or `failed`; resume only missing or failed IDs.
 
@@ -110,7 +114,7 @@ Require:
 - recognizable identity, face, hair, age, build, and body proportions
 - every selected garment present and recognizable
 - exact garment color, material, fit, construction, graphics, logos, text, proportions, and closures
-- complete head-to-shoes framing with readable outfit and realistic anatomy
+- the user's own pose, camera angle and complete head-to-shoes framing, with realistic anatomy
 - natural layering without invented openings or hidden inner pieces
 - no unselected visible garments except plain neutral shoes or invisible basics when no shoes were selected
 - no extra person, text overlay, watermark, product mockup, or synthetic AI polish
@@ -122,12 +126,12 @@ Regenerate identity drift, missing or redesigned garments, fake closures or text
 After all requested outfits pass:
 
 1. Create `data/outfit-images/` if needed.
-2. Copy each accepted PNG to `data/outfit-images/OUTFIT-ID.png`.
-3. Set every accepted manifest image to `/api/import/outfits/OUTFIT-ID.png` only if the app exposes that endpoint; otherwise keep the repository-relative `outfit-images/OUTFIT-ID.png` path.
+2. Copy each accepted PNG to `data/outfit-images/OUTFIT-ID-TIMESTAMP.png`, with a new timestamp for every regenerated image. The app serves this folder with a one-year immutable cache, so reusing a file name would keep showing the old image.
+3. Set every accepted manifest image to `/api/import/outfits/OUTFIT-ID-TIMESTAMP.png`.
 4. Atomically write the exact requested collection to `data/outfits.json`.
 5. Reopen every copied file and verify that the count of images, unique outfit IDs, and accepted manifest records all equal the number the user requested.
 
-Do not claim the current gallery displays outfits unless the app has an outfit route. The completed local assets and manifest are still the deliverable.
+Never write to `data/plans.json` or name files after dates (`YYYY-MM-DD-*.png`): those belong to the app's planner and its try-ons. The app does not display this collection; the local images and manifest are the deliverable.
 
 ## Finish
 

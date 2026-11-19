@@ -156,7 +156,12 @@ struct ServerError: LocalizedError {
 @Observable
 final class Store {
     var serverURL: String = UserDefaults.standard.string(forKey: "serverURL") ?? "http://localhost:5173" {
-        didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
+        didSet {
+            UserDefaults.standard.set(serverURL, forKey: "serverURL")
+            // Another address is another server: nothing known about the old one counts until it answers.
+            config = nil
+            refreshing = nil
+        }
     }
     var items: [Item] = []
     var plans: [Plan] = []
@@ -201,6 +206,28 @@ final class Store {
     var reviewing: Set<String> = []
     /// What the AI is doing right now ("Checking the cutout…", "Retrying (2/3): …"), keyed like "job:<id>" or "plan:<date>".
     var progress: [String: String] = [:]
+    /// Edits that couldn't be saved yet, kept across launches and sent again once the Mac answers.
+    private(set) var pendingEdits: [String: Item] = UserDefaults.standard.data(forKey: "pendingEdits").flatMap { try? JSONDecoder().decode([String: Item].self, from: $0) } ?? [:] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(pendingEdits), forKey: "pendingEdits") }
+    }
+    /// The user's outline for the try-on skeleton, made once per photo of them because Vision takes a moment.
+    @ObservationIgnored var silhouette: (stamp: Date, image: CGImage)?
+    /// How far the Mac's clock is ahead of the phone's, from its replies, so wait cursors use the Mac's time.
+    @ObservationIgnored private(set) var serverClockOffset: TimeInterval = 0
+    /// Bumped whenever a change on the server succeeds, so a list read that started before it can't put old values back.
+    @ObservationIgnored private var changes = 0
+    /// Counts settings saves, so only the newest reply is shown when taps outrun the Mac.
+    @ObservationIgnored private var settingsWrites = 0
+    @ObservationIgnored private var refreshing: Task<Void, Never>?
+    @ObservationIgnored private var sendingPending = false
+    /// Photos not yet on the Mac, kept on disk so a sleeping Mac or a closed app loses none; sent again on reconnect.
+    private static let outbox = URL.applicationSupportDirectory.appending(path: "outbox", directoryHint: .isDirectory)
+    private static let httpDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
 
     // Long AI work runs in the background on the Mac, so every request here is short.
     private let session: URLSession = {
@@ -234,9 +261,10 @@ final class Store {
         guard let url = url(path) else { throw ServerError(message: "Invalid server address") }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        if let body {
+        // The server only accepts changes sent as JSON, even ones without a body.
+        if method != "GET" {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.httpBody = try JSONSerialization.data(withJSONObject: body ?? [:])
         }
         let retries = retry ?? ["GET", "PATCH", "DELETE"].contains(method) ? 2 : 0
         var attempt = 0
@@ -254,7 +282,14 @@ final class Store {
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
             throw ServerError(message: message ?? "Server error \(http.statusCode)")
         }
+        if method != "GET" { changes += 1 }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// A list endpoint, skipping any entry this app can't read instead of failing the whole list.
+    private func sendList<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil, retry: Bool? = nil) async throws -> [T] {
+        let list: Lossy<T> = try await send(path, method: method, body: body, retry: retry)
+        return list.elements
     }
 
     /// Runs an action and surfaces failures as an alert instead of throwing.
@@ -271,27 +306,60 @@ final class Store {
         }
     }
 
+    /// Reloads everything; calls that overlap (launch, foregrounding, the heartbeat) share one round of requests.
     func refresh() async {
+        if let refreshing { return await refreshing.value }
+        let task = Task { await reload(); refreshing = nil }
+        refreshing = task
+        await task.value
+    }
+
+    private func reload() async {
+        let started = changes
         do {
-            async let items: [Item] = send("/api/import/wardrobe")
-            async let plans: [Plan] = send("/api/import/plans")
-            async let config: ServerConfig = send("/api/import/config")
-            async let jobs: [Job] = send("/api/import/jobs")
-            (self.items, self.plans, self.config, self.jobs) = try await (items, plans, config, jobs)
+            async let loadedItems: [Item] = sendList("/api/import/wardrobe")
+            async let loadedPlans: [Plan] = sendList("/api/import/plans")
+            async let loadedConfig: ServerConfig = send("/api/import/config")
+            async let loadedJobs: [Job] = sendList("/api/import/jobs")
+            let (latestItems, latestPlans, latestConfig, latestJobs) = try await (loadedItems, loadedPlans, loadedConfig, loadedJobs)
+            config = latestConfig
+            // A change that finished meanwhile already brought newer lists.
+            if started == changes { (items, plans, jobs) = (latestItems, latestPlans, latestJobs) }
             connectionError = nil
             isOnline = true
-            // Older servers lack these; that is what serverIsOutdated reports.
-            version = try? await send("/api/import/version")
-            settings = try? await send("/api/import/settings")
-            // Searches and styling may have finished while the app was away.
-            if let latest: [Detection] = try? await send("/api/import/detections") { detections = latest }
-            if !planning.isEmpty || !styling.isEmpty { await loadStyling() }
+            // Older servers lack these (that is what serverIsOutdated reports); a dropped request keeps what was known.
+            do { version = try await send("/api/import/version") } catch is URLError, is CancellationError {} catch { version = nil }
+            do { settings = try await send("/api/import/settings") } catch is URLError, is CancellationError {} catch { settings = nil }
+            // Searches and styling may have finished, or still be running, from before the app was closed.
+            await loadDetections()
+            await loadStyling()
+            // Not part of this refresh: an action in it that finds the Mac gone refreshes, and would wait on itself.
+            Task { await sendPending() }
         } catch is CancellationError {
         } catch let error as URLError where error.code == .cancelled {
-        } catch {
+        } catch let error as URLError {
             print("Wardrobe could not reach \(serverURL): \(error)")
             isOnline = false
             connectionError = error.localizedDescription
+        } catch {
+            // The Mac answered with something this app couldn't read: it is reachable, so actions shouldn't say otherwise.
+            print("Wardrobe could not read \(serverURL): \(error)")
+            isOnline = true
+            connectionError = error.localizedDescription
+        }
+    }
+
+    /// Sends what couldn't reach the Mac before: edits made while it was away, and photos still waiting to upload.
+    private func sendPending() async {
+        guard !sendingPending else { return }
+        sendingPending = true
+        defer { sendingPending = false }
+        for edit in pendingEdits.values { await update(edit) }
+        let waiting = (try? FileManager.default.contentsOfDirectory(at: Self.outbox, includingPropertiesForKeys: nil)) ?? []
+        for file in waiting {
+            let id = file.deletingPathExtension().lastPathComponent
+            guard !uploading.contains(id), let jpeg = try? Data(contentsOf: file) else { continue }
+            await importPhoto(jpeg, id: id)
         }
     }
 
@@ -300,8 +368,9 @@ final class Store {
         guard let url = url("/api/import/version") else { return }
         do {
             let (_, response) = try await session.data(for: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 4))
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-            if !isOnline { await refresh() }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw URLError(.badServerResponse) }
+            if let date = http.value(forHTTPHeaderField: "Date").flatMap({ Self.httpDate.date(from: $0) }) { serverClockOffset = date.timeIntervalSinceNow }
+            if !isOnline || config == nil { await refresh() }
         } catch is CancellationError {
         } catch let error as URLError where error.code == .cancelled {
         } catch {
@@ -320,12 +389,29 @@ final class Store {
     }
 
     func setDefaultWears(_ part: String, _ wears: Int) async {
+        let previous = settings
         settings?.wears?[part] = wears
-        await run { settings = try await send("/api/import/settings", method: "PATCH", body: ["wears": [part: wears]]) }
+        await saveSettings(["wears": [part: wears]], previous: previous)
     }
 
     func setChecks(_ checks: String) async {
-        await run { settings = try await send("/api/import/settings", method: "PATCH", body: ["checks": checks]) }
+        await saveSettings(["checks": checks], previous: settings)
+    }
+
+    private func saveSettings(_ body: [String: Any], previous: ServerSettings?) async {
+        settingsWrites += 1
+        let write = settingsWrites
+        var saved = false
+        await run {
+            let latest: ServerSettings = try await send("/api/import/settings", method: "PATCH", body: body)
+            saved = true
+            if write == settingsWrites { settings = latest }
+        }
+        // A save that didn't land shows what the Mac has, not a value it never stored.
+        if !saved, write == settingsWrites {
+            let latest: ServerSettings? = try? await send("/api/import/settings")
+            settings = latest ?? previous
+        }
     }
 
     func uploadModelReference(_ jpeg: Data) async {
@@ -336,21 +422,30 @@ final class Store {
     }
 
     func setUnavailable(_ ids: [String], _ unavailable: Bool) async {
-        await run { items = try await send("/api/import/wardrobe", method: "PATCH", body: ["ids": ids, "unavailable": unavailable]) }
+        await run { items = try await sendList("/api/import/wardrobe", method: "PATCH", body: ["ids": ids, "unavailable": unavailable]) }
     }
 
     func loadItems() async {
-        if let latest: [Item] = try? await send("/api/import/wardrobe") { items = latest }
+        let started = changes
+        if let latest: [Item] = try? await sendList("/api/import/wardrobe"), started == changes { items = latest }
     }
 
     /// Saves edited details; the server normalizes them and returns the stored piece.
+    /// Kept as pending until the Mac has them, so an edit made while it's away isn't lost.
     func update(_ item: Item) async {
+        pendingEdits[item.id] = item
         await run {
             var body: [String: Any] = ["name": item.name, "part": item.part, "tags": item.tags ?? [], "description": item.description ?? "", "text": item.text ?? "", "backText": item.backText ?? ""]
             body["color"] = item.color
             body["secondaryColor"] = item.secondaryColor ?? NSNull()
             body["wears"] = item.wears ?? NSNull()
-            let saved: Item = try await send("/api/import/wardrobe/\(item.id)", method: "PATCH", body: body)
+            let saved: Item
+            do { saved = try await send("/api/import/wardrobe/\(item.id)", method: "PATCH", body: body) } catch let error where !(error is URLError) {
+                // The Mac turned it down (the piece is gone, say); sending it again won't help.
+                pendingEdits[item.id] = nil
+                throw error
+            }
+            pendingEdits[item.id] = nil
             if let index = items.firstIndex(where: { $0.id == saved.id }) { items[index] = saved }
         }
     }
@@ -386,6 +481,7 @@ final class Store {
         await run {
             let _: [String: AnyCodable] = try await send("/api/import/wardrobe/\(item.id)", method: "DELETE")
             items.removeAll { $0.id == item.id }
+            pendingEdits[item.id] = nil
         }
     }
 
@@ -402,7 +498,7 @@ final class Store {
                 entry["include"] = day.include
                 return entry
             }
-            styling = try await send("/api/import/plans", method: "POST", body: ["days": body, "background": true])
+            styling = try await sendList("/api/import/plans", method: "POST", body: ["days": body, "background": true])
         }
         // Not started at all: nothing to wait for.
         for date in dates where !styling.contains(where: { $0.date == date && $0.status == "working" }) { planning[date] = nil }
@@ -413,10 +509,15 @@ final class Store {
         await loadProgress()
         if !detections.isEmpty || !uploading.isEmpty { await loadDetections() }
         if !planning.isEmpty || !styling.isEmpty { await loadStyling() }
+        // Results land in these lists, so they're reloaded while their work runs, whichever screen is open.
+        if itemsWorking { await loadItems() }
+        if jobsWorking { await loadJobs() }
+        if tryOnsWorking { await loadPlans() }
     }
 
     func loadDetections() async {
-        guard let latest: [Detection] = try? await send("/api/import/detections") else { return }
+        let started = changes
+        guard let latest: [Detection] = try? await sendList("/api/import/detections"), started == changes else { return }
         let finished = detections.filter(\.isWorking).contains { old in latest.first { $0.id == old.id }?.isWorking != true }
         detections = latest
         if finished { await loadJobs() }
@@ -424,11 +525,12 @@ final class Store {
 
     func dismissDetection(_ detection: Detection) async {
         detections.removeAll { $0.id == detection.id }
-        await run { detections = try await send("/api/import/detections/\(detection.id)", method: "DELETE") }
+        await run { detections = try await sendList("/api/import/detections/\(detection.id)", method: "DELETE") }
     }
 
     func loadStyling() async {
-        guard let latest: [Styling] = try? await send("/api/import/plans/styling") else { return }
+        let started = changes
+        guard let latest: [Styling] = try? await sendList("/api/import/plans/styling"), started == changes else { return }
         let before = planningDates
         styling = latest
         let working = Set(latest.filter { $0.status == "working" }.map(\.date))
@@ -445,21 +547,30 @@ final class Store {
     }
 
     func loadPlans() async {
-        if let latest: [Plan] = try? await send("/api/import/plans") { plans = latest }
+        let started = changes
+        if let latest: [Plan] = try? await sendList("/api/import/plans"), started == changes { plans = latest }
     }
 
     func tryOn(_ plan: Plan) async {
         await Notifier.requestPermission()
         // Safe to repeat: the server doesn't start a second try-on of the same day.
-        await run { plans = try await send("/api/import/plans/\(plan.date)/try-on", method: "POST", body: [:], retry: true) }
+        await run { plans = try await sendList("/api/import/plans/\(plan.date)/try-on", method: "POST", retry: true) }
+    }
+
+    private var tryOnsWorking: Bool { plans.contains { $0.tryOn?.status == "processing" } }
+    private var itemsWorking: Bool { items.contains { $0.back?.status == "processing" || $0.front?.status == "processing" } }
+    private var jobsWorking: Bool {
+        jobs.contains { ["queued", "processing"].contains($0.current.stage.status) || ($0.current.name == "garment" && $0.current.stage.status == "pending") }
     }
 
     /// AI work is still running on the Mac (cutouts or try-ons), so a notification is worth waiting for.
     var hasPendingWork: Bool {
-        plans.contains { $0.tryOn?.status == "processing" }
-            || !uploading.isEmpty || detections.contains(where: \.isWorking)
-            || items.contains { $0.back?.status == "processing" || $0.front?.status == "processing" }
-            || jobs.contains { ["queued", "processing"].contains($0.current.stage.status) || ($0.current.name == "garment" && $0.current.stage.status == "pending") }
+        tryOnsWorking || !uploading.isEmpty || detections.contains(where: \.isWorking) || itemsWorking || jobsWorking
+    }
+
+    /// Pieces waiting for the user's decision, counted like the Mac counts them for its notification.
+    var reviewCount: Int {
+        jobs.filter { $0.current.name != "modeled" && ["review", "failed"].contains($0.current.stage.status) }.count
     }
 
     /// Anything the AI is working on that the user is watching.
@@ -470,27 +581,39 @@ final class Store {
     }
 
     func deletePlan(_ plan: Plan) async {
-        await run { plans = try await send("/api/import/plans/\(plan.date)", method: "DELETE") }
+        await run { plans = try await sendList("/api/import/plans/\(plan.date)", method: "DELETE") }
     }
 
     func loadJobs() async {
-        if let latest: [Job] = try? await send("/api/import/jobs") { jobs = latest }
+        let started = changes
+        if let latest: [Job] = try? await sendList("/api/import/jobs"), started == changes { jobs = latest }
     }
 
     /// Uploads a photo; the Mac searches it in the background and poll() follows along.
-    func importPhoto(_ jpeg: Data) async {
-        let id = UUID().uuidString
+    /// The photo waits in the outbox until the Mac has it; id stays the same when it's sent again.
+    func importPhoto(_ jpeg: Data, id: String = UUID().uuidString) async {
+        let file = Self.outbox.appending(path: "\(id).jpg")
+        try? FileManager.default.createDirectory(at: Self.outbox, withIntermediateDirectories: true)
+        try? jpeg.write(to: file, options: .atomic)
         uploading.append(id)
         defer { uploading.removeAll { $0 == id } }
         await Notifier.requestPermission()
         // Finishes the upload if the user leaves the app; the rest happens on the Mac.
-        let task = UIApplication.shared.beginBackgroundTask(withName: "import")
-        defer { UIApplication.shared.endBackgroundTask(task) }
-        await run {
-            // Safe to repeat: the server joins an upload with the same id to the search already running.
-            let detection: Detection = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())", "clientId": id, "background": true], retry: true)
-            detections.removeAll { $0.id == detection.id }
-            detections.append(detection)
+        await withBackgroundTime("import") {
+            await run {
+                let detection: Detection
+                do {
+                    // Safe to repeat: the server joins an upload with the same id to the search already running.
+                    detection = try await send("/api/import/jobs", method: "POST", body: ["imageDataUrl": "data:image/jpeg;base64,\(jpeg.base64EncodedString())", "clientId": id, "background": true], retry: true)
+                } catch let error where !(error is URLError) {
+                    // The Mac turned the photo down; sending it again won't help.
+                    try? FileManager.default.removeItem(at: file)
+                    throw error
+                }
+                try? FileManager.default.removeItem(at: file)
+                detections.removeAll { $0.id == detection.id }
+                detections.append(detection)
+            }
         }
     }
 
@@ -501,9 +624,32 @@ final class Store {
         defer { reviewing.remove(job.id) }
         await run {
             // Safe to repeat: the server treats a second approve or discard of the same piece as done.
-            let _: AnyCodable = try await send("/api/import/jobs/\(job.id)/stages/\(job.current.name)/\(action)", method: "POST", body: [:], retry: true)
-            jobs = try await send("/api/import/jobs")
-            if action == "approve", job.current.name != "crop" { items = try await send("/api/import/wardrobe") }
+            let _: AnyCodable = try await send("/api/import/jobs/\(job.id)/stages/\(job.current.name)/\(action)", method: "POST", retry: true)
+            jobs = try await sendList("/api/import/jobs")
+            if action == "approve", job.current.name != "crop" { items = try await sendList("/api/import/wardrobe") }
+        }
+    }
+}
+
+/// Keeps the app running briefly once it's in the background; when iOS's time is up the task ends instead of the app being killed.
+func withBackgroundTime(_ name: String, _ work: () async -> Void) async {
+    nonisolated(unsafe) var task = UIBackgroundTaskIdentifier.invalid
+    task = UIApplication.shared.beginBackgroundTask(withName: name) {
+        UIApplication.shared.endBackgroundTask(task)
+        task = .invalid
+    }
+    await work()
+    if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+}
+
+/// A list that skips entries it can't read, so one odd record doesn't hide everything else.
+nonisolated struct Lossy<Element: Decodable>: Decodable {
+    var elements: [Element] = []
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let element = try? container.decode(Element.self) { elements.append(element) } else { _ = try container.decode(AnyCodable.self) }
         }
     }
 }
