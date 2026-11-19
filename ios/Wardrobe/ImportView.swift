@@ -73,25 +73,21 @@ struct ImportForm: View {
         .photosPicker(isPresented: $choosing, selection: $selection, maxSelectionCount: 5, matching: .images)
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker { photo in
-                guard let jpeg = uploadJPEG(photo) else { return }
-                Task { await store.importPhoto(jpeg) }
+                Task {
+                    guard let jpeg = await uploadJPEG(photo) else { return }
+                    await store.importPhoto(jpeg)
+                }
             }
             .ignoresSafeArea()
         }
-        .task(id: busy) {
-            await store.loadJobs()
-            // Poll while generations run on the server.
-            while busy && !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                await store.loadJobs()
-            }
-        }
+        // The store keeps these fresh while generations run on the Mac.
+        .task { await store.loadJobs() }
         .onChange(of: selection) { _, picked in
             guard !picked.isEmpty else { return }
             selection = []
             for item in picked {
                 Task {
-                    guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = uploadJPEG(data) else { return }
+                    guard let data = try? await item.loadTransferable(type: Data.self), let jpeg = await uploadJPEG(data) else { return }
                     await store.importPhoto(jpeg)
                 }
             }
@@ -207,7 +203,7 @@ private struct JobCard: View {
         let (name, stage) = job.current
         let isCrop = name == "crop"
         VStack(alignment: .leading, spacing: 14) {
-            AsyncImage(url: store.url(stage.assetUrl, width: 1000), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+            RetryingAsyncImage(url: store.url(stage.assetUrl, width: 1000), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
                 if case .success(let image) = phase { image.resizable().scaledToFit().transition(.opacity) }
                 else { GarmentSkeleton(kind: GarmentKind(part: job.metadata.part, name: job.metadata.name)).padding(.vertical, 16) }
             }

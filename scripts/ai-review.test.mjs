@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { missingWords, untilApproved, withFeedback } from "./ai-review.mjs";
+import sharp from "sharp";
+import { UNCHECKED, backoff, isTransient, missingWords, reviewCutout, untilApproved, withFeedback } from "./ai-review.mjs";
 
 test("untilApproved retries with the reviewer's problems as feedback", async () => {
   const seen = [];
@@ -48,4 +49,42 @@ test("untilApproved stops at once when an attempt is cancelled", async () => {
   let calls = 0;
   await assert.rejects(untilApproved({ attempts: 3, make: async () => { calls += 1; throw Object.assign(new Error("Discarded"), { cancelled: true }); }, check: async () => [] }), /Discarded/);
   assert.equal(calls, 1);
+});
+
+test("untilApproved waits out a busy service without telling the model, and stops on a refusal", async () => {
+  const waits = [];
+  const seen = [];
+  const notes = [];
+  let calls = 0;
+  const { result } = await untilApproved({
+    attempts: 3,
+    wait: async (ms) => { waits.push(ms); },
+    make: async (feedback) => { seen.push(feedback); calls += 1; if (calls === 1) throw Object.assign(new Error("Rate limit reached"), { status: 429, retryAfter: 7 }); return "image"; },
+    check: async () => [],
+    onRetry: (problems) => notes.push(problems[0]),
+  });
+  assert.equal(result, "image");
+  assert.deepEqual(waits, [7000]);
+  assert.deepEqual(seen, [[], []]);
+  assert.match(notes[0], /busy/);
+  assert.equal(backoff(new Error("x"), 1), 4000);
+  assert.ok(isTransient(Object.assign(new Error("timed out"), { transient: true })) && isTransient({ status: 503 }) && !isTransient({ status: 400 }));
+  // A moderation refusal fails the same way every time: no second attempt, but an earlier result is kept.
+  let tries = 0;
+  const refusal = () => Object.assign(new Error("Rejected by the safety system"), { status: 400 });
+  await assert.rejects(untilApproved({ attempts: 3, wait: async () => {}, make: async () => { tries += 1; throw refusal(); }, check: async () => [] }), /safety/);
+  assert.equal(tries, 1);
+  const kept = await untilApproved({ attempts: 3, wait: async () => {}, make: async (_, attempt) => { if (attempt === 2) throw refusal(); return attempt; }, check: async () => ["off"] });
+  assert.deepEqual(kept, { result: 1, problems: ["off"] });
+});
+
+test("an unavailable reviewer marks the result unchecked instead of paying for another attempt", async () => {
+  const image = await sharp({ create: { width: 32, height: 32, channels: 3, background: "#336699" } }).png().toBuffer();
+  const ai = { json: async () => { throw new Error("down"); } };
+  const problems = await reviewCutout(ai, { photo: image, cutout: image });
+  assert.deepEqual([...problems], [UNCHECKED]);
+  let attempts = 0;
+  const kept = await untilApproved({ attempts: 3, make: async () => { attempts += 1; return image; }, check: (cutout) => reviewCutout(ai, { photo: image, cutout }) });
+  assert.equal(attempts, 1);
+  assert.deepEqual([...kept.problems], [UNCHECKED]);
 });

@@ -1,23 +1,15 @@
-const CACHE = "open-wardrobe-shell-v1";
-const IMAGE_CACHE = "wardrobe-images-v1";
+const CACHE = "open-wardrobe-shell-v2";
+const IMAGE_CACHE = "wardrobe-images-v2";
 const ACTIVE_CACHES = new Set([CACHE, IMAGE_CACHE]);
 const MAX_IMAGE_ENTRIES = 800;
-const SHELL = ["/", "/manifest.webmanifest"];
+const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
+// Never change once written: built files carry a content hash, and the server stamps new cutouts and try-ons with new names.
+const IMMUTABLE = [/^\/assets\//, /^\/_ipx\//, /^\/api\/import\/library\//, /^\/api\/import\/outfits\//];
 
 async function trimImages(cache) {
   const keys = await cache.keys();
   const overflow = keys.length - MAX_IMAGE_ENTRIES;
   if (overflow > 0) await Promise.all(keys.slice(0, overflow).map((request) => cache.delete(request)));
-}
-
-async function fetchAndCacheImage(request, cache) {
-  const response = await fetch(request);
-  const contentType = response.headers.get("content-type") || "";
-  if (response.ok && !response.redirected && contentType.startsWith("image/")) {
-    await cache.put(request, response.clone());
-    await trimImages(cache);
-  }
-  return response;
 }
 
 self.addEventListener("install", (event) => {
@@ -35,17 +27,19 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+  if (request.method !== "GET" || url.origin !== self.location.origin) return;
 
-  if (url.pathname.startsWith("/_ipx/")) {
-    event.respondWith(caches.open(IMAGE_CACHE).then(async (cache) => {
+  // Cache first: an immutable file never needs asking for again, and the app still opens with the Mac out of reach.
+  if (IMMUTABLE.some((pattern) => pattern.test(url.pathname))) {
+    const isAsset = url.pathname.startsWith("/assets/");
+    event.respondWith(caches.open(isAsset ? CACHE : IMAGE_CACHE).then(async (cache) => {
       const cached = await cache.match(request);
-      const update = fetchAndCacheImage(request, cache);
-      if (cached) {
-        event.waitUntil(update.catch(() => undefined));
-        return cached;
+      if (cached) return cached;
+      const response = await fetch(request);
+      if (response.ok && !response.redirected) {
+        event.waitUntil(cache.put(request, response.clone()).then(() => isAsset ? undefined : trimImages(cache)));
       }
-      return update;
+      return response;
     }));
     return;
   }

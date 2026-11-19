@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 enum Theme {
@@ -68,9 +69,11 @@ struct QuietButtonStyle: ButtonStyle {
 struct GarmentImage: View {
     @Environment(Store.self) private var store
     let item: Item?
+    /// Pixels wide to ask the server for.
+    var width = 800
 
     var body: some View {
-        AsyncImage(url: store.url(item?.image, width: 800), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
+        RetryingAsyncImage(url: store.url(item?.image, width: width), transaction: Transaction(animation: .easeOut(duration: 0.35))) { phase in
             if case .success(let image) = phase {
                 image.resizable().scaledToFit().transition(.opacity)
             } else {
@@ -78,6 +81,29 @@ struct GarmentImage: View {
             }
         }
         .accessibilityLabel(item?.name ?? "Missing item")
+    }
+}
+
+/// AsyncImage that loads again a few times after a failure (a Wi-Fi blip, a busy Mac) instead of staying blank.
+struct RetryingAsyncImage<Content: View>: View {
+    let url: URL?
+    var transaction = Transaction()
+    @ViewBuilder let content: (AsyncImagePhase) -> Content
+    @State private var attempt = 0
+
+    var body: some View {
+        AsyncImage(url: url, transaction: transaction) { phase in
+            content(phase)
+            if case .failure = phase, attempt < 3 {
+                Color.clear.task {
+                    try? await Task.sleep(for: .seconds(2 << attempt))
+                    attempt += 1
+                }
+            }
+        }
+        // A new id makes AsyncImage start over.
+        .id(attempt)
+        .onChange(of: url) { attempt = 0 }
     }
 }
 
@@ -137,11 +163,14 @@ nonisolated extension Color {
 }
 
 /// Photos are downscaled before upload; the server never needs more than 2048px.
-func uploadJPEG(_ data: Data) -> Data? {
-    UIImage(data: data).flatMap(uploadJPEG)
+/// Off the main thread, decoding straight to that size: a full decode of a 48MP photo there froze the UI.
+@concurrent nonisolated func uploadJPEG(_ data: Data) async -> Data? {
+    let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 2048] as CFDictionary
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil), let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+    return UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
 }
 
-func uploadJPEG(_ image: UIImage) -> Data? {
+@concurrent nonisolated func uploadJPEG(_ image: UIImage) async -> Data? {
     let scale = min(1, 2048 / max(image.size.width, image.size.height))
     let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
     // The default format renders at the screen's scale, which turned 2048 into 6144 pixels.

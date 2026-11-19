@@ -8,6 +8,7 @@ import UserNotifications
 nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     static let shared = Notifier()
     private static let identifier = "dev.wardrobe.app.wait"
+    private static let reviewsKey = "notifiedReviews"
 
     private let lock = NSLock()
     private var backgroundCompletion: (() -> Void)?
@@ -18,6 +19,8 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
         configuration.timeoutIntervalForRequest = 15 * 60
+        // Background sessions wait for a network indefinitely by default; a wait stuck that long is replaced instead.
+        configuration.timeoutIntervalForResource = 60 * 60
         return URLSession(configuration: configuration, delegate: shared, delegateQueue: nil)
     }()
     private var session: URLSession { Self.backgroundSession }
@@ -34,18 +37,19 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
-    /// Starts one wait unless one is already in flight.
-    /// Called as the app backgrounds; the assertion keeps it alive until iOS owns the request.
-    @MainActor func arm(base: URL) {
-        let assertion = UIApplication.shared.beginBackgroundTask(withName: "arm-wait")
-        session.getAllTasks { tasks in
-            if tasks.isEmpty { self.start(base: base) }
-            Task { @MainActor in UIApplication.shared.endBackgroundTask(assertion) }
-        }
+    /// Starts one wait unless one to this server is already in flight. since is the Mac's time the wait looks back to;
+    /// reviews is how many pieces the user has already been shown as waiting, so they aren't announced again.
+    @MainActor func arm(base: URL, since: Date, reviews: Int) async {
+        UserDefaults.standard.set(reviews, forKey: Self.reviewsKey)
+        let tasks = await session.allTasks
+        // A wait to another address (the server moved) would never report back; replace it.
+        guard !tasks.contains(where: { $0.originalRequest?.url?.host == base.host && $0.originalRequest?.url?.port == base.port }) else { return }
+        tasks.forEach { $0.cancel() }
+        start(base: base, since: Int(since.timeIntervalSince1970 * 1000))
     }
 
     /// since is the server's cursor from the previous wait, so results landing between waits aren't skipped.
-    private func start(base: URL, since: Int = Int(Date.now.timeIntervalSince1970 * 1000)) {
+    private func start(base: URL, since: Int) {
         guard let url = URL(string: "/api/import/wait?since=\(since)", relativeTo: base) else { return }
         session.downloadTask(with: url).resume()
     }
@@ -79,13 +83,15 @@ nonisolated final class Notifier: NSObject, URLSessionDownloadDelegate, @uncheck
             } else if back.status == "ready" { Self.post("Back cutout ready", "\(back.name) now has its back photo.") }
             else { Self.post("Back cutout didn't work", "Open \(back.name) to try again.") }
         }
-        if result.reviews > 0 {
+        // The Mac counts every piece awaiting review, so only a rise is news.
+        if result.reviews > UserDefaults.standard.integer(forKey: Self.reviewsKey) {
             Self.post("Ready to review", result.reviews == 1 ? "1 piece is waiting for you." : "\(result.reviews) pieces are waiting for you.")
         }
+        UserDefaults.standard.set(result.reviews, forKey: Self.reviewsKey)
         // The server caps each wait; keep waiting while it still has work.
         // An absolute path resolves against the finished request's host, which survives an app relaunch.
         if result.busy, let url = downloadTask.originalRequest?.url {
-            if let cursor = result.cursor { start(base: url, since: cursor) } else { start(base: url) }
+            start(base: url, since: result.cursor ?? Int(Date.now.timeIntervalSince1970 * 1000))
         }
     }
 

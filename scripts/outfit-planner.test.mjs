@@ -173,3 +173,17 @@ test("too many garments for the image tool share one numbered sheet", async () =
   assert.deepEqual([sheet.width, sheet.height], [1536, 1536]);
   assert.deepEqual(await sharp(await garmentSheet(Array(5).fill(square))).metadata().then((m) => [m.width, m.height]), [2304, 1536]);
 });
+
+test("pair and restyle rules give way when the wardrobe can't avoid them", () => {
+  // Two tops and one bottom make two top-bottom pairs, so a third nearby day has to repeat one.
+  const small = [{ id: "tee", part: "upperbody" }, { id: "shirt", part: "upperbody" }, { id: "jeans", part: "lowerbody" }];
+  const bigger = [...small, { id: "chinos", part: "lowerbody" }];
+  const plans = { "2026-11-17": plan("2026-11-17", ["tee", "jeans"]), "2026-11-18": plan("2026-11-18", ["shirt", "jeans"]) };
+  assert.deepEqual(pairIssues(plans, [plan("2026-11-19", ["tee", "jeans"])], small), []);
+  // With chinos there are four pairs, so the same repeat is avoidable.
+  assert.equal(pairIssues(plans, [plan("2026-11-19", ["tee", "jeans"])], bigger).length, 1);
+  // A restyle can change only the top when the other top is the only alternative.
+  const days = [{ date: "2026-11-19", avoid: [["tee", "jeans"]] }];
+  assert.deepEqual(restyleIssues(days, [plan("2026-11-19", ["shirt", "jeans"])], small), []);
+  assert.match(restyleIssues(days, [plan("2026-11-19", ["shirt", "jeans"])], bigger)[0], /only 1 piece/);
+});
