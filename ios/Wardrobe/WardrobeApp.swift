@@ -113,7 +113,7 @@ struct RootView: View {
         }
         .overlay(alignment: .top) {
             if !store.isOnline {
-                Label("Not connected to your Mac", systemImage: "wifi.slash")
+                Label("Not connected to the server", systemImage: "wifi.slash")
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Theme.ink)
                     .padding(.horizontal, 14)

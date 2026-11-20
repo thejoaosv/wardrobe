@@ -23,7 +23,7 @@ struct ImportForm: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Add clothes").font(.display(34))
                     Text(ready ? "Snap or pick photos. Each piece is found, cut out, pressed and checked for you."
-                         : "On your Mac, run `codex login` to use your ChatGPT plan, or add an OpenAI API key.")
+                         : "On the server, run `codex login` to use your ChatGPT plan, or add an OpenAI API key.")
                         .font(.subheadline).foregroundStyle(Theme.muted)
                 }
 
@@ -44,7 +44,7 @@ struct ImportForm: View {
                 if busy {
                     group("Working on it") {
                         ForEach(store.uploading, id: \.self) { _ in
-                            WorkingRow(kind: nil, title: "New photo", status: "Sending to your Mac…")
+                            WorkingRow(kind: nil, title: "New photo", status: "Sending to the server…")
                         }
                         ForEach(searching) { detection in
                             WorkingRow(kind: nil, title: "New photo", status: detection.message ?? "Finding clothes…")

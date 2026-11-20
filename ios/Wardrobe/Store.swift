@@ -163,8 +163,9 @@ final class Store {
             refreshing = nil
         }
     }
-    var items: [Item] = []
-    var plans: [Plan] = []
+    /// Start from the last lists the server sent, so the first screen draws at once and the refresh only updates it.
+    var items: [Item] = Store.snapshot("items") ?? []
+    var plans: [Plan] = Store.snapshot("plans") ?? []
     var jobs: [Job] = []
     var config: ServerConfig?
     /// nil when the server predates versions.
@@ -183,7 +184,7 @@ final class Store {
     /// False as soon as a request or the heartbeat can't reach the Mac, so actions fail at once instead of after a timeout.
     var isOnline = true
     var isConnected: Bool { isOnline && config != nil }
-    private static let offlineMessage = "Couldn't reach your Mac. Check that it's awake and on the same Wi-Fi, then try again."
+    private static let offlineMessage = "Couldn't reach the server. Check that it's running and that this phone is online, then try again."
     private let pathMonitor = NWPathMonitor()
 
     init() {
@@ -327,6 +328,9 @@ final class Store {
             if started == changes { (items, plans, jobs) = (latestItems, latestPlans, latestJobs) }
             connectionError = nil
             isOnline = true
+            Self.saveSnapshot(items, "items")
+            Self.saveSnapshot(plans, "plans")
+            prefetchImages()
             // Older servers lack these (that is what serverIsOutdated reports); a dropped request keeps what was known.
             do { version = try await send("/api/import/version") } catch is URLError, is CancellationError {} catch { version = nil }
             do { settings = try await send("/api/import/settings") } catch is URLError, is CancellationError {} catch { settings = nil }
@@ -347,6 +351,51 @@ final class Store {
             isOnline = true
             connectionError = error.localizedDescription
         }
+    }
+
+    private static func snapshot<T: Decodable>(_ name: String) -> T? {
+        (try? Data(contentsOf: URL.cachesDirectory.appending(path: "\(name).json"))).flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    }
+
+    private static func saveSnapshot<T: Encodable>(_ value: T, _ name: String) {
+        try? JSONEncoder().encode(value).write(to: URL.cachesDirectory.appending(path: "\(name).json"), options: .atomic)
+    }
+
+    @ObservationIgnored private var prefetching: Task<Void, Never>?
+
+    /// Warms the image cache in the order screens need it: the first two planned days, the closet grid, each piece's
+    /// sheet, then the other days. Images never change at a given address, so cached ones are skipped.
+    private func prefetchImages() {
+        prefetching?.cancel()
+        let upcoming = plans.filter { $0.date >= Day.today }.sorted { $0.date < $1.date }
+        let outfits = { (plans: ArraySlice<Plan>) in
+            plans.flatMap { plan in plan.garmentIds.map { self.url(self.item($0)?.image, width: 800) } + [self.url(plan.tryOn?.image, width: 1200)] }
+        }
+        // Widths match the views (GarmentImage, ClosetCell, ItemSheet, DayPage) so AsyncImage finds them in URLCache.
+        let stages: [[URL?]] = [
+            outfits(upcoming.prefix(2)),
+            items.map { url($0.image, width: 400) },
+            items.flatMap { [url($0.image, width: 800), url($0.backImage, width: 800)] },
+            outfits(upcoming.dropFirst(2)),
+        ]
+        prefetching = Task(priority: .utility) {
+            for stage in stages {
+                await withTaskGroup(of: Void.self) { group in
+                    for (index, url) in stage.compactMap({ $0 }).enumerated() {
+                        // A few at a time, so images the user is looking at aren't stuck behind the queue.
+                        if index >= 4 { await group.next() }
+                        group.addTask { await Self.warm(url) }
+                    }
+                }
+                if Task.isCancelled { return }
+            }
+        }
+    }
+
+    @concurrent nonisolated private static func warm(_ url: URL) async {
+        let request = URLRequest(url: url)
+        guard !Task.isCancelled, URLCache.shared.cachedResponse(for: request) == nil else { return }
+        _ = try? await URLSession.shared.data(for: request)
     }
 
     /// Sends what couldn't reach the Mac before: edits made while it was away, and photos still waiting to upload.

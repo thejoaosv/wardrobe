@@ -18,7 +18,7 @@ struct SettingsView: View {
                     link(.connection) {
                         HStack(spacing: 10) {
                             Circle().fill(!store.isConnected ? Color.red : store.serverIsOutdated ? Color.orange : Color.green).frame(width: 8, height: 8)
-                            Text(!store.isConnected ? "Not connected to your Mac" : store.serverIsOutdated ? "Your Mac needs an update" : "Connected to your Mac")
+                            Text(!store.isConnected ? "Not connected to the server" : store.serverIsOutdated ? "The server needs an update" : "Connected to the server")
                                 .font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
                             Spacer()
                             RowValue()
@@ -92,9 +92,9 @@ private struct ConnectionPage: View {
 
     var body: some View {
         @Bindable var store = store
-        Page(title: "Your Mac") {
-            Panel(title: "Server address", footer: "Run `npm run dev` in the wardrobe folder on your Mac, then enter its address, e.g. http://my-mac.local:5173.") {
-                TextField("http://my-mac.local:5173", text: $store.serverURL)
+        Page(title: "Server") {
+            Panel(title: "Server address", footer: "Enter the address of the computer running the wardrobe server, e.g. http://my-server.local:5173.") {
+                TextField("http://my-server.local:5173", text: $store.serverURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -117,7 +117,7 @@ private struct ConnectionPage: View {
             }
 
             if store.serverIsOutdated {
-                Panel(title: "Update needed", footer: "This app needs a newer server. In the wardrobe folder on your Mac, run `git pull`, then restart `npm run dev`.") {
+                Panel(title: "Update needed", footer: "This app needs a newer server. On the server, run `git pull` in the wardrobe folder, then restart the wardrobe service.") {
                     PanelRow(title: "Server is out of date", symbol: "arrow.triangle.2.circlepath")
                 }
             }
@@ -227,7 +227,7 @@ private struct LaundryPage: View {
             }
             .disabled(store.settings?.wears == nil)
             if store.settings?.wears == nil {
-                Text("Update the server on your Mac to change these.").font(.footnote).foregroundStyle(Theme.muted)
+                Text("Update the server to change these.").font(.footnote).foregroundStyle(Theme.muted)
             }
         }
     }
